@@ -185,7 +185,8 @@ ZenBot/
 │       ├── logger.js           # Formatted console logger
 │       └── chunker.js          # Discord markdown message chunker
 ├── data/                       # Persistent JSON datastores
-│   ├── projects.json           # Tracked engineering projects
+│   ├── projects.example.json   # Template for tracked engineering projects
+│   ├── projects.json           # (Ignored) Your personal active projects and tasks
 │   ├── profile.json            # (Ignored) User profile context
 │   ├── facts.json              # (Ignored) Learned personal facts
 │   └── memories.json           # (Ignored) Past conversation history
@@ -201,7 +202,7 @@ ZenBot/
 ## Security & Privacy
 
 - **Zero Credential Exposure**: Discord tokens and AI API keys are read exclusively from environment variables and strictly gitignored.
-- **Data Isolation**: Private chat logs (`memories.json`), personal facts (`facts.json`), and user profiles (`profile.json`) are excluded by `.gitignore` to ensure personal data is never pushed to public repositories.
+- **Data Isolation**: Private chat logs (`memories.json`), personal facts (`facts.json`), user profile (`profile.json`), and personal projects and tasks (`projects.json`) are excluded by `.gitignore` to ensure personal data is never pushed to public repositories.
 - **Access Control**: ZenBot supports user ID and channel whitelisting via `DISCORD_ALLOWED_USER_IDS` and `CHANNEL_ID` to restrict usage on shared Discord servers.
 
 ---
