@@ -14,6 +14,14 @@ class ProjectStore {
                 const data = fs.readFileSync(this.filePath, 'utf8');
                 return JSON.parse(data);
             }
+            // Fallback to example template if main projects file does not exist yet
+            const examplePath = path.join(path.dirname(this.filePath), 'projects.example.json');
+            if (fs.existsSync(examplePath)) {
+                const data = fs.readFileSync(examplePath, 'utf8');
+                const parsed = JSON.parse(data);
+                this._save(parsed);
+                return parsed;
+            }
         } catch (e) {
             logger.warn(`Could not read projects from ${this.filePath}:`, e.message);
         }

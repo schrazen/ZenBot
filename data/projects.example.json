@@ -1,0 +1,34 @@
+[
+  {
+    "id": "portfolio-website",
+    "name": "Personal Developer Portfolio",
+    "status": "Active",
+    "category": "Frontend & Portfolio",
+    "description": "Modern responsive developer portfolio highlighting featured projects, case studies, and engineering background.",
+    "stack": ["HTML5", "CSS3 / Tailwind", "JavaScript (ES6+)", "GitHub Pages"],
+    "highlights": [
+      "Responsive UI showcasing engineering case studies and live demos",
+      "Optimized Core Web Vitals and clean accessible layout"
+    ],
+    "tasks": [
+      "Add interactive case studies",
+      "Refine dark mode styling"
+    ]
+  },
+  {
+    "id": "zenbot-assistant",
+    "name": "ZenBot AI Assistant",
+    "status": "Active",
+    "category": "AI Agent & Backend",
+    "description": "Cloud-powered Discord AI assistant with multi-tiered persistent memory and multi-provider failover.",
+    "stack": ["Node.js", "Discord.js", "Groq API", "Google Gemini API"],
+    "highlights": [
+      "Decoupled multi-provider LLM orchestration with automatic failover",
+      "Persistent memory architecture for contextual conversations"
+    ],
+    "tasks": [
+      "Add unit test suite",
+      "Deploy to cloud host"
+    ]
+  }
+]

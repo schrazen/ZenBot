@@ -13,6 +13,7 @@ zen.env
 data/memories.json
 data/facts.json
 data/profile.json
+data/projects.json
 
 # Legacy local files
 legacy/
