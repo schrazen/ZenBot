@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Environment configurations and secrets
+.env
+.env.local
+zen.env
+*.backup
+*.bak
+
+# Personal data & chat memories (protect privacy on GitHub)
+data/memories.json
+data/facts.json
+data/profile.json
+
+# Legacy local files
+legacy/
+hermes/
+
+# IDE & OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
