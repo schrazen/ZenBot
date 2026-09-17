@@ -33,11 +33,14 @@ class StudyService {
         this.storagePath = storagePath ||
             (config?.paths?.data ? path.join(config.paths.data, 'study_decks.json') : path.join(__dirname, '../../data/study_decks.json'));
 
-        // Map of channelId -> ActiveSession
-        // ActiveSession: { channelId, userId, deckName, cardIds, currentIndex, score: { correct, incorrect }, currentCard }
+        this.defaultDeck = 'acads';
+        this.channelActiveDecks = new Map();
         this.activeSessions = new Map();
 
         this.decks = this.loadDecks();
+        if (!this.decks.acads && Object.keys(this.decks).filter(k => !k.startsWith('_')).length === 0) {
+            this.decks.acads = [];
+        }
     }
 
     /**
@@ -47,7 +50,11 @@ class StudyService {
         try {
             if (fs.existsSync(this.storagePath)) {
                 const raw = fs.readFileSync(this.storagePath, 'utf8');
-                return JSON.parse(raw);
+                const parsed = JSON.parse(raw);
+                if (parsed._metadata?.defaultDeck) {
+                    this.defaultDeck = parsed._metadata.defaultDeck;
+                }
+                return parsed;
             }
         } catch (e) {
             logger.warn(`Could not load study_decks.json: ${e.message}`);
@@ -66,7 +73,14 @@ class StudyService {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            fs.writeFileSync(this.storagePath, JSON.stringify(this.decks, null, 2), 'utf8');
+            const payload = {
+                _metadata: {
+                    defaultDeck: this.defaultDeck || 'acads',
+                    updatedAt: Date.now()
+                },
+                ...this.decks
+            };
+            fs.writeFileSync(this.storagePath, JSON.stringify(payload, null, 2), 'utf8');
         } catch (e) {
             logger.error(`Failed to save study_decks.json: ${e.message}`);
         }
@@ -81,56 +95,270 @@ class StudyService {
     }
 
     /**
-     * Returns list of all decks and their card counts.
+     * Gets the active deck for a channel (or default).
      */
-    listDecks() {
-        return Object.entries(this.decks).map(([name, cards]) => ({
-            name,
-            cardCount: Array.isArray(cards) ? cards.length : 0,
-            count: Array.isArray(cards) ? cards.length : 0,
-            updatedAt: Array.isArray(cards) && cards.length > 0 ? cards[cards.length - 1].createdAt : null
-        }));
+    getActiveDeck(channelId = null) {
+        if (channelId && this.channelActiveDecks.has(channelId)) {
+            return this.channelActiveDecks.get(channelId);
+        }
+        return this.defaultDeck || 'acads';
     }
 
-    getDecksSummary() {
-        return this.listDecks();
+    /**
+     * Sets the active deck for a channel (or globally).
+     */
+    setActiveDeck(channelId, deckName) {
+        const deckKey = this.normalizeDeckName(deckName);
+        if (!this.decks[deckKey]) {
+            return {
+                success: false,
+                message: `Deck **${deckKey}** does not exist. Use \`!study create ${deckKey}\` to create it first.`
+            };
+        }
+
+        if (channelId) {
+            this.channelActiveDecks.set(channelId, deckKey);
+        }
+        this.defaultDeck = deckKey;
+        this.saveDecks();
+
+        const cardCount = Array.isArray(this.decks[deckKey]) ? this.decks[deckKey].length : 0;
+        return {
+            success: true,
+            deck: deckKey,
+            cardCount,
+            message: `Switched active deck to **${deckKey}** (${cardCount} card${cardCount === 1 ? '' : 's'}). Subsequent notes and quizzes will default to this deck.`
+        };
+    }
+
+    /**
+     * Creates a new empty study deck.
+     */
+    createDeck(name) {
+        const deckKey = this.normalizeDeckName(name);
+        if (this.decks[deckKey]) {
+            return {
+                success: false,
+                message: `Deck **${deckKey}** already exists! Switch to it using \`!study use ${deckKey}\`.`
+            };
+        }
+
+        this.decks[deckKey] = [];
+        this.saveDecks();
+        logger.info(`Created new study deck: "${deckKey}"`);
+
+        return {
+            success: true,
+            deck: deckKey,
+            message: `Created new deck **${deckKey}**! Use \`!study use ${deckKey}\` to set it active, or \`!study notes <text>\` to add cards.`
+        };
+    }
+
+    /**
+     * Returns list of all decks, card counts, and active indicator.
+     */
+    listDecks(channelId = null) {
+        const active = this.getActiveDeck(channelId);
+        return Object.entries(this.decks)
+            .filter(([name]) => !name.startsWith('_'))
+            .map(([name, cards]) => ({
+                name,
+                isActive: name === active,
+                cardCount: Array.isArray(cards) ? cards.length : 0,
+                count: Array.isArray(cards) ? cards.length : 0,
+                updatedAt: Array.isArray(cards) && cards.length > 0 ? cards[cards.length - 1].createdAt : null
+            }));
+    }
+
+    getDecksSummary(channelId = null) {
+        return this.listDecks(channelId);
     }
 
     /**
      * Gets a single deck by name.
      */
-    getDeck(name = 'acads') {
-        const deckKey = this.normalizeDeckName(name);
+    getDeck(name = null, channelId = null) {
+        const targetName = name || this.getActiveDeck(channelId);
+        const deckKey = this.normalizeDeckName(targetName);
         return {
             name: deckKey,
-            cards: this.decks[deckKey] || []
+            isActive: deckKey === this.getActiveDeck(channelId),
+            cards: Array.isArray(this.decks[deckKey]) ? this.decks[deckKey] : []
         };
     }
 
     /**
-     * Clears all cards in a deck.
+     * Renames a deck.
      */
-    clearDeck(deckName = 'acads') {
+    renameDeck(oldName, newName, channelId = null) {
+        const oldKey = this.normalizeDeckName(oldName);
+        const newKey = this.normalizeDeckName(newName);
+
+        if (!this.decks[oldKey]) {
+            return { success: false, message: `Deck **${oldKey}** does not exist.` };
+        }
+        if (this.decks[newKey] && oldKey !== newKey) {
+            return { success: false, message: `Deck **${newKey}** already exists! Choose a different name.` };
+        }
+
+        this.decks[newKey] = this.decks[oldKey];
+        if (oldKey !== newKey) {
+            delete this.decks[oldKey];
+        }
+
+        if (this.defaultDeck === oldKey) {
+            this.defaultDeck = newKey;
+        }
+        for (const [chId, d] of this.channelActiveDecks.entries()) {
+            if (d === oldKey) this.channelActiveDecks.set(chId, newKey);
+        }
+
+        this.saveDecks();
+        return {
+            success: true,
+            oldDeck: oldKey,
+            newDeck: newKey,
+            message: `Renamed deck **${oldKey}** to **${newKey}** (${this.decks[newKey].length} cards).`
+        };
+    }
+
+    /**
+     * Deletes a deck completely.
+     */
+    deleteDeck(deckName) {
         const deckKey = this.normalizeDeckName(deckName);
+        if (!this.decks[deckKey]) {
+            return { success: false, message: `Deck **${deckKey}** not found.` };
+        }
+
+        const count = Array.isArray(this.decks[deckKey]) ? this.decks[deckKey].length : 0;
+        delete this.decks[deckKey];
+
+        // Ensure at least 'acads' exists
+        if (Object.keys(this.decks).filter(k => !k.startsWith('_')).length === 0) {
+            this.decks.acads = [];
+        }
+
+        if (this.defaultDeck === deckKey) {
+            const remaining = Object.keys(this.decks).filter(k => !k.startsWith('_'));
+            this.defaultDeck = remaining[0] || 'acads';
+        }
+
+        for (const [chId, d] of this.channelActiveDecks.entries()) {
+            if (d === deckKey) {
+                this.channelActiveDecks.set(chId, this.defaultDeck);
+            }
+        }
+
+        this.saveDecks();
+        logger.info(`Deleted deck: "${deckKey}" (${count} cards)`);
+        return {
+            success: true,
+            deck: deckKey,
+            removedCount: count,
+            activeDeck: this.defaultDeck,
+            message: `Deleted deck **${deckKey}** (${count} card${count === 1 ? '' : 's'} removed). Active deck is now **${this.defaultDeck}**.`
+        };
+    }
+
+    /**
+     * Clears all cards in a deck without deleting the deck itself.
+     */
+    clearDeck(deckName = null, channelId = null) {
+        const target = deckName || this.getActiveDeck(channelId);
+        const deckKey = this.normalizeDeckName(target);
         if (this.decks[deckKey]) {
             const count = this.decks[deckKey].length;
             this.decks[deckKey] = [];
             this.saveDecks();
-            return { success: true, count, deck: deckKey };
+            return {
+                success: true,
+                count,
+                deck: deckKey,
+                message: `Cleared all **${count}** card${count === 1 ? '' : 's'} in deck **${deckKey}**.`
+            };
         }
-        return { success: false, error: `Deck "${deckName}" not found.` };
+        return { success: false, message: `Deck **${target}** not found.` };
+    }
+
+    /**
+     * Adds a single card manually to a deck.
+     */
+    addCard(deckName, answer, description, aliases = []) {
+        const deckKey = this.normalizeDeckName(deckName);
+        if (!this.decks[deckKey]) {
+            this.decks[deckKey] = [];
+        }
+
+        const card = {
+            id: `card_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            description: String(description).trim(),
+            answer: String(answer).trim(),
+            aliases: Array.isArray(aliases) ? aliases.map(a => String(a).toLowerCase().trim()) : [],
+            createdAt: Date.now(),
+            stats: { asked: 0, correct: 0, incorrect: 0 }
+        };
+
+        this.decks[deckKey].push(card);
+        this.saveDecks();
+        return {
+            success: true,
+            card,
+            deck: deckKey,
+            message: `Added card **"${card.answer}"** to deck **${deckKey}** (${this.decks[deckKey].length} cards total).`
+        };
+    }
+
+    /**
+     * Deletes a specific card by term answer, alias, or 1-based index.
+     */
+    deleteCard(deckName, target) {
+        const deckKey = this.normalizeDeckName(deckName);
+        const deck = this.decks[deckKey];
+        if (!deck || deck.length === 0) {
+            return { success: false, message: `Deck **${deckKey}** is empty or not found.` };
+        }
+
+        const cleanTarget = String(target).toLowerCase().trim();
+        let removeIndex = -1;
+
+        const numIndex = parseInt(cleanTarget, 10);
+        if (!isNaN(numIndex) && numIndex >= 1 && numIndex <= deck.length) {
+            removeIndex = numIndex - 1;
+        } else {
+            removeIndex = deck.findIndex(c =>
+                c.id === cleanTarget ||
+                c.answer.toLowerCase() === cleanTarget ||
+                (Array.isArray(c.aliases) && c.aliases.includes(cleanTarget))
+            );
+        }
+
+        if (removeIndex === -1) {
+            return { success: false, message: `Card matching "${target}" not found in deck **${deckKey}**.` };
+        }
+
+        const removedCard = deck.splice(removeIndex, 1)[0];
+        this.saveDecks();
+        return {
+            success: true,
+            deck: deckKey,
+            removedCard,
+            remainingCount: deck.length,
+            message: `Removed card **"${removedCard.answer}"** from deck **${deckKey}** (${deck.length} remaining).`
+        };
     }
 
     /**
      * MODE 1: INGESTION
      * Extracts key concepts into exact pairs of [Description] and [Word Answer].
      */
-    async ingestNotes(rawNotes, deckName = 'acads') {
+    async ingestNotes(rawNotes, deckName = null, channelId = null) {
         if (!rawNotes || !rawNotes.trim()) {
             throw new Error('No notes provided for ingestion.');
         }
 
-        const deckKey = this.normalizeDeckName(deckName);
+        const targetDeck = deckName || this.getActiveDeck(channelId);
+        const deckKey = this.normalizeDeckName(targetDeck);
         if (!this.decks[deckKey]) {
             this.decks[deckKey] = [];
         }
@@ -255,8 +483,9 @@ class StudyService {
      * MODE 2: REVIEW
      * Starts or continues a quiz session, returning ONLY ONE [Description].
      */
-    startReview(channelId, userId, deckName = 'acads') {
-        const deckKey = this.normalizeDeckName(deckName);
+    startReview(channelId, userId, deckName = null) {
+        const targetDeck = deckName || this.getActiveDeck(channelId);
+        const deckKey = this.normalizeDeckName(targetDeck);
         const deck = this.decks[deckKey] || [];
 
         if (deck.length === 0) {

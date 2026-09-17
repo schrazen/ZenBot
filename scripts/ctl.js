@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn, exec, execSync } = require('child_process');
 const readline = require('readline');
 
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -91,7 +91,7 @@ function getDataSummary() {
     if (fs.existsSync(DECKS_FILE)) {
         try {
             const decks = JSON.parse(fs.readFileSync(DECKS_FILE, 'utf8'));
-            const keys = Object.keys(decks);
+            const keys = Object.keys(decks).filter(k => !k.startsWith('_'));
             deckCount = keys.length;
             cardCount = keys.reduce((sum, k) => sum + (decks[k].cards?.length || 0), 0);
         } catch (e) {}
@@ -133,18 +133,39 @@ function printStatus(verbose = false) {
 }
 
 /**
- * Starts ZenBot in the foreground
+ * Launches ZenBot in a dedicated Live Console window.
+ * The Control Center menu remains completely active in this window!
  */
-function startForeground() {
+function startLiveWindow() {
     const procs = findZenProcesses();
     if (procs.length > 0) {
         console.log(`\n${c.yellow}[!] ZenBot is already running (PID: ${procs.map(p => p.ProcessId).join(', ')}).${c.reset}`);
-        console.log(`Stop it first with option [3] or command: start-zenbot.bat off`);
+        console.log(`To stop: choose option [3] or type 'off'.`);
         return;
     }
 
-    console.log(`\n${c.green}[+] Starting ZenBot in Foreground Console...${c.reset}`);
-    console.log(`${c.dim}Press Ctrl+C anytime to stop.${c.reset}\n`);
+    console.log(`\n${c.green}[+] Opening ZenBot Live Console in a new window...${c.reset}`);
+    exec('start "ZenBot Live Console" cmd.exe /c "node index.js"', {
+        cwd: ROOT_DIR
+    });
+    console.log(`  ${c.green}✓ Live Console window launched!${c.reset}`);
+    console.log(`  ${c.dim}The Control Center is still active here. Type [3] or 'off' anytime to stop.${c.reset}`);
+}
+
+/**
+ * Starts ZenBot directly in the current terminal window.
+ */
+function startForeground(callback = null) {
+    const procs = findZenProcesses();
+    if (procs.length > 0) {
+        console.log(`\n${c.yellow}[!] ZenBot is already running (PID: ${procs.map(p => p.ProcessId).join(', ')}).${c.reset}`);
+        console.log(`To stop: choose option [3] or type 'off'.`);
+        if (callback) callback();
+        return;
+    }
+
+    console.log(`\n${c.green}[+] Starting ZenBot in this terminal...${c.reset}`);
+    console.log(`${c.dim}Press Ctrl+C to stop ZenBot and return to the menu.${c.reset}\n`);
 
     const child = spawn('node', ['index.js'], {
         cwd: ROOT_DIR,
@@ -152,7 +173,10 @@ function startForeground() {
     });
 
     child.on('exit', (code) => {
-        console.log(`\n${c.yellow}[*] ZenBot process exited with code ${code}.${c.reset}`);
+        console.log(`\n${c.yellow}[*] ZenBot process finished (exit code ${code}).${c.reset}`);
+        if (callback) {
+            setTimeout(callback, 1000);
+        }
     });
 }
 
@@ -200,6 +224,10 @@ function stopBot() {
         }
     }
 
+    try {
+        execSync('taskkill /fi "WINDOWTITLE eq ZenBot Live Console*" /f /t', { stdio: 'ignore' });
+    } catch (e) {}
+
     if (fs.existsSync(PID_FILE)) {
         try { fs.unlinkSync(PID_FILE); } catch (e) {}
     }
@@ -217,7 +245,7 @@ function restartBot(bg = false) {
         if (bg) {
             startBackground();
         } else {
-            startForeground();
+            startLiveWindow();
         }
     }, 1200);
 }
@@ -270,13 +298,14 @@ function runMenu() {
 
     function showPrompt() {
         printStatus();
-        console.log(`  ${c.bold}[1]${c.reset} Turn ON  (Foreground Console)`);
-        console.log(`  ${c.bold}[2]${c.reset} Turn ON  (Background Daemon)`);
+        console.log(`  ${c.bold}[1]${c.reset} Turn ON  (Live Console Window - keeps Control Center active)`);
+        console.log(`  ${c.bold}[2]${c.reset} Turn ON  (Background Daemon - Silent)`);
         console.log(`  ${c.bold}[3]${c.reset} Turn OFF (Stop ZenBot)`);
         console.log(`  ${c.bold}[4]${c.reset} Restart ZenBot`);
         console.log(`  ${c.bold}[5]${c.reset} Refresh Status`);
         console.log(`  ${c.bold}[6]${c.reset} Sync / Register Slash Commands`);
         console.log(`  ${c.bold}[7]${c.reset} View Daemon Logs`);
+        console.log(`  ${c.bold}[8]${c.reset} Run in Current Window (Foreground)`);
         console.log(`  ${c.bold}[0]${c.reset} Exit Control Center`);
         console.log(`${c.cyan}----------------------------------------------------------------------${c.reset}`);
 
@@ -287,8 +316,9 @@ function runMenu() {
                 case '1':
                 case 'on':
                 case 'start':
-                    rl.close();
-                    startForeground();
+                case 'win':
+                    startLiveWindow();
+                    setTimeout(showPrompt, 1500);
                     break;
 
                 case '2':
@@ -308,8 +338,11 @@ function runMenu() {
 
                 case '4':
                 case 'restart':
-                    rl.close();
-                    restartBot(false);
+                    stopBot();
+                    setTimeout(() => {
+                        startLiveWindow();
+                        setTimeout(showPrompt, 1500);
+                    }, 1200);
                     break;
 
                 case '5':
@@ -331,6 +364,14 @@ function runMenu() {
                     setTimeout(showPrompt, 2000);
                     break;
 
+                case '8':
+                case 'fg':
+                    rl.close();
+                    startForeground(() => {
+                        runMenu();
+                    });
+                    break;
+
                 case '0':
                 case 'exit':
                 case 'quit':
@@ -341,7 +382,7 @@ function runMenu() {
                     break;
 
                 default:
-                    console.log(`\n${c.yellow}Unknown option "${answer}". Choose 0-7 or on/off/restart.${c.reset}`);
+                    console.log(`\n${c.yellow}Unknown option "${answer}". Choose 0-8 or on/off/restart.${c.reset}`);
                     setTimeout(showPrompt, 1500);
                     break;
             }
@@ -357,7 +398,12 @@ const arg = (process.argv[2] || '').toLowerCase();
 switch (arg) {
     case 'on':
     case 'start':
+    case 'win':
+        startLiveWindow();
+        break;
+
     case 'fg':
+    case 'foreground':
         startForeground();
         break;
 

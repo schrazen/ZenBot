@@ -160,11 +160,19 @@ class MessageHandler {
             }
         }
 
-        // 4. Natural Study Triggers (Mode 2: Review)
+        // 4. Natural Deck Switch Trigger ("use deck <name>", "switch deck <name>")
+        const deckSwitchRegex = /^(?:use|set|switch|change)\s+deck\s+([a-z0-9_-]+)$/i;
+        const deckSwitchMatch = userQuery.match(deckSwitchRegex);
+        if (deckSwitchMatch && this.studyService) {
+            const res = this.studyService.setActiveDeck(message.channel.id, deckSwitchMatch[1]);
+            return await message.reply(res.message);
+        }
+
+        // 5. Natural Study Triggers (Mode 2: Review)
         const reviewTriggerRegex = /^(?:quiz me|review|start quiz|test me|quiz|review notes)(?:\s+(?:on|for|deck)?\s*([a-z0-9_-]+))?$/i;
         const reviewMatch = userQuery.match(reviewTriggerRegex);
         if (reviewMatch && this.studyService) {
-            const deckName = reviewMatch[1] ? reviewMatch[1].trim() : 'acads';
+            const deckName = reviewMatch[1] ? reviewMatch[1].trim() : this.studyService.getActiveDeck(message.channel.id);
             const review = this.studyService.startReview(message.channel.id, message.author.id, deckName);
             if (!review.success) {
                 return await message.reply(review.message);
@@ -188,7 +196,7 @@ class MessageHandler {
             }
         }
 
-        // 5. Natural Notes Ingestion Trigger (Mode 1: Ingestion)
+        // 6. Natural Notes Ingestion Trigger (Mode 1: Ingestion)
         const notesTriggerRegex = /^(?:notes|study|acads|flashcards|save notes|add notes):\s*([\s\S]*)$/i;
         const notesMatch = userQuery.match(notesTriggerRegex);
         if ((notesMatch || (attachmentText && userQuery.toLowerCase().includes('notes'))) && this.studyService) {
@@ -199,10 +207,11 @@ class MessageHandler {
                     await message.channel.sendTyping();
                 } catch (e) {}
 
-                const res = await this.studyService.ingestNotes(combinedContent, 'acads');
+                const activeDeck = this.studyService.getActiveDeck(message.channel.id);
+                const res = await this.studyService.ingestNotes(combinedContent, activeDeck, message.channel.id);
                 if (res.success && res.addedCount > 0) {
                     // MODE 1: Reply ONLY with brief confirmation of count and ask if ready. Do not list terms.
-                    return await message.reply(`Saved **${res.addedCount}** terms for review! Ready to begin? (Reply **"Quiz me"** when you're ready)`);
+                    return await message.reply(`Saved **${res.addedCount}** terms to deck **${res.deckName}**! Ready to begin? (Reply **"Quiz me"** when you're ready)`);
                 } else if (res.success) {
                     return await message.reply(`No distinct terms and definitions could be extracted from those notes. Make sure to provide concepts with descriptions or definitions!`);
                 } else {

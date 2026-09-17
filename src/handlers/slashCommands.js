@@ -167,6 +167,56 @@ const slashCommands = [
         .setName('study')
         .setDescription('Interactive Acads Study Companion (ingest notes, review flashcards, quiz)')
         .addSubcommand(sub =>
+            sub.setName('use')
+                .setDescription('Set or switch the active study deck')
+                .addStringOption(opt =>
+                    opt.setName('deck')
+                        .setDescription('Deck name to set active')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('create')
+                .setDescription('Create a new study deck')
+                .addStringOption(opt =>
+                    opt.setName('name')
+                        .setDescription('Name of the new deck')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('delete')
+                .setDescription('Delete a study deck completely')
+                .addStringOption(opt =>
+                    opt.setName('deck')
+                        .setDescription('Name of the deck to delete')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('rename')
+                .setDescription('Rename a study deck')
+                .addStringOption(opt =>
+                    opt.setName('old')
+                        .setDescription('Current deck name')
+                        .setRequired(true)
+                )
+                .addStringOption(opt =>
+                    opt.setName('new')
+                        .setDescription('New deck name')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('view')
+                .setDescription('Inspect cards in a study deck')
+                .addStringOption(opt =>
+                    opt.setName('deck')
+                        .setDescription('Deck name to inspect (defaults to active)')
+                        .setRequired(false)
+                )
+        )
+        .addSubcommand(sub =>
             sub.setName('notes')
                 .setDescription('Ingest raw notes into [Description -> Word Answer] pairs silently')
                 .addStringOption(opt =>
@@ -180,7 +230,7 @@ const slashCommands = [
                 .setDescription('Start an interactive quiz session')
                 .addStringOption(opt =>
                     opt.setName('deck')
-                        .setDescription('Deck name (default: acads)')
+                        .setDescription('Deck name (defaults to active)')
                         .setRequired(false)
                 )
         )
@@ -190,14 +240,14 @@ const slashCommands = [
         )
         .addSubcommand(sub =>
             sub.setName('decks')
-                .setDescription('List flashcard decks and card counts')
+                .setDescription('List all flashcard decks and show active deck')
         )
         .addSubcommand(sub =>
             sub.setName('clear')
-                .setDescription('Clear a flashcard deck')
+                .setDescription('Clear cards in a flashcard deck')
                 .addStringOption(opt =>
                     opt.setName('deck')
-                        .setDescription('Deck name to clear (default: acads)')
+                        .setDescription('Deck name to clear (defaults to active)')
                         .setRequired(false)
                 )
         ),

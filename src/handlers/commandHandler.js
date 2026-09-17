@@ -129,13 +129,18 @@ class CommandHandler {
             .setColor(0x2b2d42)
             .addFields(
                 {
-                    name: 'Interactive Acads & Flashcard Study',
+                    name: 'Interactive Acads & Flashcard Study (CRUD)',
                     value: (
-                        '`!study notes <text>` — Ingest raw acads notes into flashcards silently\n' +
+                        '`!study use <deck>` — Switch active study deck\n' +
+                        '`!study create <deck>` / `!study delete <deck>` — Create or delete a deck\n' +
+                        '`!study decks` — List all decks & show active deck\n' +
+                        '`!study view [deck]` — Inspect flashcards in a deck\n' +
+                        '`!study rename <old> <new>` — Rename a deck\n' +
+                        '`!study notes <text>` — Ingest raw notes into active deck silently\n' +
                         '`!study quiz [deck]` or `!quiz` — Start interactive review session\n' +
                         '`!study stop` or `!quiz stop` — Stop current review session\n' +
-                        '`!study decks` — List flashcard decks & card counts\n' +
-                        '`!study clear [deck]` — Clear a study deck'
+                        '`!study clear [deck]` — Clear all cards in a deck\n' +
+                        '`!study remove <term>` — Delete a single card from active deck'
                     )
                 },
                 {
@@ -925,6 +930,22 @@ class CommandHandler {
      * - !study decks
      * - !study clear [deck]
      */
+    /**
+     * Interactive Acads & Flashcard Study System with Complete CRUD
+     * Supports:
+     * - !study use <deck> / !study switch <deck> (Set active deck)
+     * - !study create <deck> (Create new deck)
+     * - !study decks / !study list (List decks, showing active)
+     * - !study view [deck] (Inspect deck cards with spoiler answers)
+     * - !study rename <old> <new> (Rename deck)
+     * - !study delete <deck> (Delete deck)
+     * - !study clear [deck] (Clear cards in deck)
+     * - !study addcard <answer> | <description> (Manual card add)
+     * - !study remove <term_or_index> (Delete single card)
+     * - !study notes <text> (Mode 1: Ingestion into active/named deck)
+     * - !study quiz [deck] / !quiz [deck] (Mode 2: Review active/named deck)
+     * - !study stop / !quiz stop (End session)
+     */
     async cmdStudy(message, args = [], originalCmd = 'study') {
         if (!this.studyService) {
             return await message.reply('Study service is not initialized.');
@@ -932,31 +953,125 @@ class CommandHandler {
 
         const sub = (args[0] || '').toLowerCase();
         const rest = args.slice(1).join(' ').trim();
+        const channelId = message.channel?.id;
 
         // Check if directly invoked as !quiz or !review
         if (originalCmd === 'quiz' || originalCmd === 'review') {
             if (sub === 'stop' || sub === 'quit' || sub === 'cancel' || sub === 'end') {
-                if (!this.studyService.hasActiveSession(message.channel.id)) {
+                if (!this.studyService.hasActiveSession(channelId)) {
                     return await message.reply('No active review session in this channel.');
                 }
-                const score = this.studyService.endSession(message.channel.id);
+                const score = this.studyService.endSession(channelId);
                 if (score && score.total > 0) {
                     return await message.reply(`🛑 **Study Session Ended.**\nScore: **${score.correct}/${score.total}** (${score.percentage}%)\nGood work!`);
                 }
                 return await message.reply('🛑 **Study Session Ended.**');
             }
 
-            const deckName = sub || 'acads';
-            const review = this.studyService.startReview(message.channel.id, message.author?.id || message.user?.id, deckName);
+            const deckName = sub || this.studyService.getActiveDeck(channelId);
+            const review = this.studyService.startReview(channelId, message.author?.id || message.user?.id, deckName);
             if (!review.success) {
                 return await message.reply(review.message);
             }
             return await message.reply(`📚 **Review Started** [Deck: *${review.deckName}* | ${review.totalCards} cards]\nType your answer directly in chat, or type **"stop"** to quit anytime.\n\n**${review.description}**`);
         }
 
-        // Subcommand: notes / ingest
+        // 1. SET / SWITCH ACTIVE DECK
+        if (sub === 'use' || sub === 'set' || sub === 'switch') {
+            if (!rest) {
+                const current = this.studyService.getActiveDeck(channelId);
+                return await message.reply(`Current active deck is **${current}**. To switch: \`!study use <deck_name>\``);
+            }
+            const res = this.studyService.setActiveDeck(channelId, rest);
+            return await message.reply(res.message);
+        }
+
+        // 2. CREATE DECK
+        if (sub === 'create' || sub === 'new' || sub === 'adddeck') {
+            if (!rest) {
+                return await message.reply('Please specify a deck name: `!study create <name>`');
+            }
+            const res = this.studyService.createDeck(rest);
+            return await message.reply(res.message);
+        }
+
+        // 3. RENAME DECK
+        if (sub === 'rename') {
+            const parts = rest.split(/\s+/);
+            if (parts.length < 2) {
+                return await message.reply('Usage: `!study rename <old_name> <new_name>`');
+            }
+            const res = this.studyService.renameDeck(parts[0], parts[1], channelId);
+            return await message.reply(res.message);
+        }
+
+        // 4. DELETE DECK
+        if (sub === 'delete' || sub === 'drop' || sub === 'removedeck') {
+            if (!rest) {
+                return await message.reply('Please specify the deck to delete: `!study delete <deck_name>`');
+            }
+            const res = this.studyService.deleteDeck(rest);
+            return await message.reply(res.message);
+        }
+
+        // 5. VIEW / INSPECT DECK CARDS
+        if (sub === 'view' || sub === 'cards' || sub === 'inspect') {
+            const deckName = rest || this.studyService.getActiveDeck(channelId);
+            const deckInfo = this.studyService.getDeck(deckName, channelId);
+            if (!deckInfo.cards || deckInfo.cards.length === 0) {
+                return await message.reply(`Deck **${deckInfo.name}** is empty. Ingest notes with \`!study notes <text>\` or add cards with \`!study addcard <answer> | <description>\`.`);
+            }
+            const cardList = deckInfo.cards.slice(0, 15).map((c, i) =>
+                `**${i + 1}.** ${c.description} → ||**${c.answer}**||`
+            ).join('\n');
+            const moreText = deckInfo.cards.length > 15 ? `\n_...and ${deckInfo.cards.length - 15} more terms_` : '';
+            return await message.reply(`📖 **Deck: ${deckInfo.name}** (${deckInfo.cards.length} card${deckInfo.cards.length === 1 ? '' : 's'})${deckInfo.isActive ? ' ⭐ [ACTIVE]' : ''}\n\n${cardList}${moreText}`);
+        }
+
+        // 6. ADD SINGLE CARD MANUALLY
+        if (sub === 'addcard') {
+            const parts = rest.split('|');
+            if (parts.length < 2) {
+                return await message.reply('Usage: `!study addcard <answer> | <description>`');
+            }
+            const answer = parts[0].trim();
+            const description = parts.slice(1).join('|').trim();
+            const activeDeck = this.studyService.getActiveDeck(channelId);
+            const res = this.studyService.addCard(activeDeck, answer, description);
+            return await message.reply(res.message);
+        }
+
+        // 7. DELETE SINGLE CARD
+        if (sub === 'removecard' || sub === 'deletecard' || sub === 'remove') {
+            if (!rest) {
+                return await message.reply('Usage: `!study remove <term_or_number>` (removes matching card from active deck)');
+            }
+            const activeDeck = this.studyService.getActiveDeck(channelId);
+            const res = this.studyService.deleteCard(activeDeck, rest);
+            return await message.reply(res.message);
+        }
+
+        // 8. LIST DECKS
+        if (sub === 'decks' || sub === 'list') {
+            const decks = this.studyService.listDecks(channelId);
+            if (decks.length === 0) {
+                return await message.reply('No study decks found. Use `!study create <name>` or `!study notes <text>` to create your first deck!');
+            }
+            const lines = decks.map(d =>
+                `• **${d.name}**: ${d.cardCount} card${d.cardCount === 1 ? '' : 's'}${d.isActive ? ' ⭐ **[ACTIVE]**' : ''}`
+            );
+            return await message.reply(`📂 **Study Decks**:\n${lines.join('\n')}\n\nSwitch active deck with \`!study use <name>\` or start review with \`!quiz\`!`);
+        }
+
+        // 9. CLEAR DECK CARDS
+        if (sub === 'clear') {
+            const deckName = rest || this.studyService.getActiveDeck(channelId);
+            const res = this.studyService.clearDeck(deckName, channelId);
+            return await message.reply(res.message);
+        }
+
+        // 10. INGEST NOTES
         if (sub === 'notes' || sub === 'ingest' || sub === 'add') {
-            // Check for attached text/markdown file
             let attachmentText = null;
             if (message.attachments?.size > 0) {
                 const textAtt = message.attachments.find(att =>
@@ -983,11 +1098,12 @@ class CommandHandler {
                 }
             } catch (e) {}
 
-            const res = await this.studyService.ingestNotes(content, 'acads');
+            const activeDeck = this.studyService.getActiveDeck(channelId);
+            const res = await this.studyService.ingestNotes(content, activeDeck, channelId);
             if (res.success && res.addedCount > 0) {
                 // MODE 1: Ingestion response rule:
                 // "Reply ONLY with a brief confirmation of how many terms were saved and ask if the user is ready to begin the review. Do not list the terms."
-                return await message.reply(`Saved **${res.addedCount}** terms for review! Ready to begin? (Reply **"Quiz me"** or type \`!quiz\` when you're ready)`);
+                return await message.reply(`Saved **${res.addedCount}** terms to deck **${res.deckName}**! Ready to begin? (Reply **"Quiz me"** or type \`!quiz\` when you're ready)`);
             } else if (res.success) {
                 return await message.reply('No distinct terms and definitions could be extracted from those notes. Make sure to provide concepts with descriptions or definitions!');
             } else {
@@ -995,56 +1111,41 @@ class CommandHandler {
             }
         }
 
-        // Subcommand: quiz / start / review
+        // 11. START REVIEW / QUIZ
         if (sub === 'quiz' || sub === 'start' || sub === 'review') {
-            const deckName = rest || 'acads';
-            const review = this.studyService.startReview(message.channel.id, message.author?.id || message.user?.id, deckName);
+            const deckName = rest || this.studyService.getActiveDeck(channelId);
+            const review = this.studyService.startReview(channelId, message.author?.id || message.user?.id, deckName);
             if (!review.success) {
                 return await message.reply(review.message);
             }
             return await message.reply(`📚 **Review Started** [Deck: *${review.deckName}* | ${review.totalCards} cards]\nType your answer directly in chat, or type **"stop"** to quit anytime.\n\n**${review.description}**`);
         }
 
-        // Subcommand: stop / quit
+        // 12. STOP REVIEW
         if (sub === 'stop' || sub === 'quit' || sub === 'cancel' || sub === 'end') {
-            if (!this.studyService.hasActiveSession(message.channel.id)) {
+            if (!this.studyService.hasActiveSession(channelId)) {
                 return await message.reply('No active review session in this channel.');
             }
-            const score = this.studyService.endSession(message.channel.id);
+            const score = this.studyService.endSession(channelId);
             if (score && score.total > 0) {
                 return await message.reply(`🛑 **Study Session Ended.**\nScore: **${score.correct}/${score.total}** (${score.percentage}%)\nGood effort!`);
             }
             return await message.reply('🛑 **Study Session Ended.**');
         }
 
-        // Subcommand: decks / list
-        if (sub === 'decks' || sub === 'list') {
-            const decks = this.studyService.listDecks();
-            if (decks.length === 0) {
-                return await message.reply('No study decks found yet. Use `!study notes <text>` to add your first flashcards!');
-            }
-            const lines = decks.map(d => `• **${d.name}**: ${d.cardCount} cards (updated: ${d.updatedAt ? new Date(d.updatedAt).toLocaleDateString() : 'N/A'})`);
-            return await message.reply(`📂 **Study Decks**:\n${lines.join('\n')}\n\nStart reviewing with \`!quiz <deck>\` or \`quiz me\`!`);
-        }
-
-        // Subcommand: clear
-        if (sub === 'clear') {
-            const deckName = rest || 'acads';
-            const cleared = this.studyService.clearDeck(deckName);
-            if (cleared) {
-                return await message.reply(`🗑️ Cleared deck **${deckName}**.`);
-            } else {
-                return await message.reply(`Deck **${deckName}** not found.`);
-            }
-        }
-
         return await message.reply(
-            '**Interactive Study Commands:**\n' +
-            '• `!study notes <text>` — Silently ingest notes into [Description -> Word Answer] pairs\n' +
-            '• `!quiz [deck]` or `!study quiz` — Start interactive review session\n' +
-            '• `!quiz stop` or `stop` — Stop current review session\n' +
-            '• `!study decks` — List flashcard decks & card counts\n' +
-            '• `!study clear [deck]` — Clear a study deck'
+            '**Interactive Acads & Flashcard Commands:**\n' +
+            '• `!study use <deck>` — Set active deck for notes & quizzes\n' +
+            '• `!study create <deck>` — Create a new study deck\n' +
+            '• `!study decks` — List all decks & view active deck\n' +
+            '• `!study view [deck]` — Inspect flashcards in a deck\n' +
+            '• `!study rename <old> <new>` — Rename a deck\n' +
+            '• `!study delete <deck>` — Delete a deck completely\n' +
+            '• `!study clear [deck]` — Clear cards in a deck\n' +
+            '• `!study notes <text>` — Ingest raw notes into active deck\n' +
+            '• `!quiz [deck]` — Start interactive review session\n' +
+            '• `!study stop` or `stop` — End review session\n' +
+            '• `!study remove <term>` — Delete a single card from active deck'
         );
     }
 
@@ -1237,19 +1338,35 @@ class CommandHandler {
 
                 case 'study': {
                     const sub = interaction.options.getSubcommand(false) || 'quiz';
-                    if (sub === 'notes') {
+                    if (sub === 'use') {
+                        const deck = interaction.options.getString('deck') || '';
+                        return await this.cmdStudy(adapter, ['use', deck]);
+                    } else if (sub === 'create') {
+                        const name = interaction.options.getString('name') || '';
+                        return await this.cmdStudy(adapter, ['create', name]);
+                    } else if (sub === 'delete') {
+                        const deck = interaction.options.getString('deck') || '';
+                        return await this.cmdStudy(adapter, ['delete', deck]);
+                    } else if (sub === 'rename') {
+                        const oldName = interaction.options.getString('old') || '';
+                        const newName = interaction.options.getString('new') || '';
+                        return await this.cmdStudy(adapter, ['rename', `${oldName} ${newName}`]);
+                    } else if (sub === 'view') {
+                        const deck = interaction.options.getString('deck') || '';
+                        return await this.cmdStudy(adapter, ['view', deck]);
+                    } else if (sub === 'notes') {
                         await defer();
                         const text = interaction.options.getString('text') || '';
                         return await this.cmdStudy(adapter, ['notes', text]);
                     } else if (sub === 'quiz') {
-                        const deck = interaction.options.getString('deck') || 'acads';
+                        const deck = interaction.options.getString('deck') || '';
                         return await this.cmdStudy(adapter, ['quiz', deck]);
                     } else if (sub === 'stop') {
                         return await this.cmdStudy(adapter, ['stop']);
                     } else if (sub === 'decks') {
                         return await this.cmdStudy(adapter, ['decks']);
                     } else if (sub === 'clear') {
-                        const deck = interaction.options.getString('deck') || 'acads';
+                        const deck = interaction.options.getString('deck') || '';
                         return await this.cmdStudy(adapter, ['clear', deck]);
                     }
                     return await this.cmdStudy(adapter, []);
