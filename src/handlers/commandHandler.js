@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { EmbedBuilder } = require('discord.js');
 const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
@@ -76,6 +78,10 @@ class CommandHandler {
             case 'tokens':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can toggle token indicators.');
                 return await this.cmdTokens(message, argText);
+            case 'humor':
+            case 'intensity':
+            case 'vibe':
+                return await this.cmdHumor(message, argText);
             case 'roast':
             case 'cook':
             case 'petty':
@@ -149,6 +155,7 @@ class CommandHandler {
                     value: (
                         '`!status` — Provider status, active model, and memory counts\n' +
                         '`!limits` — Real-time tokens, remaining requests, and rate limits\n' +
+                        '`!humor` — View current humor intensity setting (0-5)\n' +
                         '`!ping` — Test bot latency'
                     )
                 },
@@ -156,6 +163,7 @@ class CommandHandler {
                     name: 'Owner Controls (Lance Only)',
                     value: (
                         '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord (or reply with `!roast`)\n' +
+                        '`!humor <0-5>` — Set humor intensity (0=serious, 2=natural, 4=shitpost, 5=degeneracy)\n' +
                         '`!provider <groq|gemini>` — Switch active AI provider\n' +
                         '`!model <name>` — Switch active LLM model\n' +
                         '`!remember <fact>` / `!forget <id>` — Store or delete permanent memories\n' +
@@ -178,6 +186,8 @@ class CommandHandler {
         const memStats = this.memoryManager.getStats();
         const activeProvider = status.activeProvider;
         const providerInfo = status.providers[activeProvider];
+        const humorLvl = this.config.persona.humorIntensity ?? 2;
+        const humorLabel = this.config.persona.humorLevels?.[humorLvl]?.label || 'Naturally Humorous';
 
         const embed = new EmbedBuilder()
             .setTitle('System Status')
@@ -196,8 +206,9 @@ class CommandHandler {
                     inline: true
                 },
                 {
-                    name: 'Context & Knowledge Stores',
+                    name: 'Context, Persona & Knowledge',
                     value: (
+                        `• Humor Intensity: **Level ${humorLvl}** (${humorLabel})\n` +
                         `• Tracked Projects: **${memStats.projectsCount}**\n` +
                         `• Remembered Facts: **${memStats.factsCount}**\n` +
                         `• Stored Interactions: **${memStats.memoriesCount}**\n` +
@@ -799,6 +810,65 @@ class CommandHandler {
     async cmdClear(message) {
         this.memoryManager.clearShortTerm(message.channel.id);
         return await message.reply('Short-term conversation history for this channel cleared.');
+    }
+
+    async cmdHumor(message, argText) {
+        const levels = this.config.persona.humorLevels;
+        const current = this.config.persona.humorIntensity ?? 2;
+
+        if (!argText) {
+            const curInfo = levels[current] || levels[2];
+            const list = Object.entries(levels)
+                .map(([lvl, info]) => `${lvl === String(current) ? '▶ ' : '  '}**Level ${lvl}**: ${info.label} — _${info.desc}_`)
+                .join('\n');
+
+            const embed = new EmbedBuilder()
+                .setTitle('ZenBot Humor Intensity')
+                .setColor(0x7209b7)
+                .setDescription(
+                    `Current Setting: **Level ${current} (${curInfo.label})**\n_${curInfo.desc}_\n\n` +
+                    `**Available Levels:**\n${list}\n\n` +
+                    `*Lance (bot owner) can change this with \`!humor <0-5>\`.*`
+                )
+                .setFooter({ text: 'Default: Level 2 (Naturally Humorous)' });
+
+            return await message.reply({ embeds: [embed] });
+        }
+
+        if (!this.isOwner(message)) {
+            const curInfo = levels[current] || levels[2];
+            return await message.reply(`Only Lance (bot owner) can change the humor intensity. Current setting is **Level ${current}** (${curInfo.label}).`);
+        }
+
+        const targetLevel = parseInt(argText.trim(), 10);
+        if (isNaN(targetLevel) || targetLevel < 0 || targetLevel > 5) {
+            return await message.reply('Please specify a humor level between **0** and **5**. Example: `!humor 2` or `!humor 4`.');
+        }
+
+        // Update in-memory config
+        this.config.persona.humorIntensity = targetLevel;
+
+        // Persist to zen.env if present
+        try {
+            const zenEnvPath = path.join(this.config.paths.root, 'zen.env');
+            if (fs.existsSync(zenEnvPath)) {
+                let envContent = fs.readFileSync(zenEnvPath, 'utf8');
+                if (/^HUMOR_INTENSITY=.*$/m.test(envContent)) {
+                    envContent = envContent.replace(/^HUMOR_INTENSITY=.*$/m, `HUMOR_INTENSITY=${targetLevel}`);
+                } else {
+                    envContent = envContent.trimEnd() + `\nHUMOR_INTENSITY=${targetLevel}\n`;
+                }
+                fs.writeFileSync(zenEnvPath, envContent, 'utf8');
+            }
+        } catch (e) {
+            logger.warn(`Could not persist HUMOR_INTENSITY to zen.env: ${e.message}`);
+        }
+
+        const newInfo = levels[targetLevel];
+        return await message.reply(
+            `Humor intensity set to **Level ${targetLevel}** (${newInfo.label}).\n` +
+            `_${newInfo.desc}_`
+        );
     }
 }
 
