@@ -46,7 +46,7 @@ class MemoryManager {
     /**
      * Builds full context messages array for LLM completion.
      */
-    buildMessages(channelId, userQuery, liveContext = null) {
+    buildMessages(channelId, userQuery, liveContext = null, { isDM = false, isOwner = false } = {}) {
         const messages = [];
 
         // 1. Base System Prompt
@@ -65,43 +65,46 @@ class MemoryManager {
         });
         systemPrompt += `\n\n[TEMPORAL CONTEXT]\nCurrent Time: ${timeStr}`;
 
-        // 3. Inject User Profile (Tier 1)
-        const profileContext = this.profile.toPromptContext();
-        if (profileContext) {
-            systemPrompt += `\n\n[USER PROFILE]\n${profileContext}`;
+        // 3. User Profile: Only inject in private DMs or if explicitly asked about Lance's profile/career
+        const wantsProfile = isDM || /\b(profile|bio|who is lance|lance'?s background|skills|career)\b/i.test(userQuery);
+        if (wantsProfile) {
+            const profileContext = this.profile.toPromptContext();
+            if (profileContext) {
+                systemPrompt += `\n\n[USER PROFILE]\n${profileContext}`;
+            }
         }
 
-        // 4. Inject Projects Knowledge (Specialized Domain Tier)
+        // 4. Projects Knowledge: Only inject if query is relevant to projects/portfolio
         const projectContext = this.projects.toPromptContext(userQuery);
         if (projectContext) {
             systemPrompt += `\n\n[PROJECTS KNOWLEDGE]\n${projectContext}`;
         }
 
-        // 5. Inject Relevant Learned Facts (Tier 2)
+        // 5. Relevant Learned Facts
         const factsContext = this.facts.toPromptContext(userQuery);
         if (factsContext) {
             systemPrompt += `\n\n[REMEMBERED FACTS]\n${factsContext}`;
         }
 
+        // 6. Relevant Past Episodic Memories (brief excerpts only)
+        const retrievedMemories = this.episodic.retrieve(userQuery, 2);
+        if (retrievedMemories.length > 0) {
+            const memorySnippets = retrievedMemories
+                .map((m, i) => {
+                    const excerpt = m.content.length > 180 ? m.content.slice(0, 180) + '...' : m.content;
+                    return `- [${new Date(m.ts).toLocaleDateString()}] ${m.role.toUpperCase()}: ${excerpt}`;
+                })
+                .join('\n');
+            systemPrompt += `\n\n[RELEVANT PAST CONVERSATION EXCERPTS]\n${memorySnippets}`;
+        }
+
         messages.push({ role: 'system', content: systemPrompt });
 
-        // 6. Inject Live Channel / Server Transcript Context if provided
+        // 7. Inject Live Channel / Server Transcript Context if provided
         if (liveContext) {
             messages.push({
                 role: 'system',
                 content: liveContext
-            });
-        }
-
-        // 7. Inject Relevant Past Episodic Memories (Tier 3)
-        const retrievedMemories = this.episodic.retrieve(userQuery, 3);
-        if (retrievedMemories.length > 0) {
-            const memorySnippets = retrievedMemories
-                .map((m, i) => `[Past interaction ${i + 1} (${new Date(m.ts).toLocaleDateString()})] ${m.role.toUpperCase()}: ${m.content}`)
-                .join('\n');
-            messages.push({
-                role: 'system',
-                content: `Relevant past conversation context retrieved from memory:\n${memorySnippets}`
             });
         }
 

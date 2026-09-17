@@ -101,20 +101,13 @@ class FactStore {
     }
 
     toPromptContext(relevantQuery = '') {
-        let matching = [];
-        if (relevantQuery) {
-            matching = this.search(relevantQuery, 6);
-        }
+        if (!relevantQuery || !this.facts.length) return null;
 
-        // If no matching facts by search, include the most recent 4 facts
-        if (matching.length === 0) {
-            matching = this.facts.slice(-4);
-        }
-
+        const matching = this.search(relevantQuery, 3);
         if (matching.length === 0) return null;
 
         const bullets = matching.map(f => `- [${f.category}] ${f.fact}`).join('\n');
-        return `Personal Facts & Learned Knowledge:\n${bullets}`;
+        return `Relevant Learned Facts:\n${bullets}`;
     }
 }
 

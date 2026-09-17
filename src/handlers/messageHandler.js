@@ -187,7 +187,8 @@ class MessageHandler {
             }
 
             // Build multi-tier context with projects, temporal awareness, and live chat transcript
-            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext);
+            const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
+            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext, { isDM, isOwner });
 
             // Execute LLM inference
             const response = await this.llmManager.chat(messages);

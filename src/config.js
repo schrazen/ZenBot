@@ -104,14 +104,14 @@ const config = {
             apiKey: process.env.GROQ_API_KEY || '',
             model: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
             fallbackModel: 'openai/gpt-oss-20b',
-            maxTokens: parseInt(process.env.GROQ_MAX_TOKENS || '800', 10),
+            maxTokens: parseInt(process.env.GROQ_MAX_TOKENS || '500', 10),
             temperature: parseFloat(process.env.GROQ_TEMPERATURE || '0.7')
         },
         gemini: {
             apiKey: process.env.GEMINI_API_KEY || '',
             model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
             fallbackModel: 'gemini-2.5-flash',
-            maxTokens: parseInt(process.env.GEMINI_MAX_TOKENS || '1000', 10),
+            maxTokens: parseInt(process.env.GEMINI_MAX_TOKENS || '500', 10),
             temperature: parseFloat(process.env.GEMINI_TEMPERATURE || '0.7')
         }
     },

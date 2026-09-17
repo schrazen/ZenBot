@@ -67,17 +67,27 @@ class ProjectStore {
         if (!query) return [];
         const clean = query.toLowerCase();
 
+        // Specific aliases per project to prevent false triggers on common words like "system", "app", "code"
+        const projectTriggers = {
+            'balik-belongings': ['balik', 'belongings', 'bbs', 'mrt-3', 'mrt3', 'lost and found'],
+            'personal-portfolio': ['portfolio', 'my portfolio', 'personal website', 'resume site'],
+            'zenbot': ['zenbot project', 'zenbot repo', 'zenbot code', 'zenbot architecture'],
+            'emotion-adaptive': ['emotion-adaptive', 'emotion adaptive', 'facial emotion'],
+            'ti-to-monitoring': ['ti-to', 'tito monitoring', 'time-in', 'time-out', 'attendance tracking'],
+            'employee-management': ['employee management', 'ems project', 'staff records']
+        };
+
         return this.projects.filter(p => {
             const idMatch = clean.includes(p.id.toLowerCase());
-            const nameWords = p.name.toLowerCase().split(/[\s\-\(\)\/]+/).filter(w => w.length > 2);
-            const nameMatch = nameWords.some(w => clean.includes(w));
-            return idMatch || nameMatch;
+            const triggers = projectTriggers[p.id.toLowerCase()] || [p.id.toLowerCase()];
+            const triggerMatch = triggers.some(t => clean.includes(t));
+            return idMatch || triggerMatch;
         });
     }
 
     /**
      * Builds prompt context. If specific projects are mentioned, detail them;
-     * otherwise, include a compact roster so the bot is always aware of what Lance owns.
+     * otherwise, include a compact roster only if explicitly inquiring about projects.
      */
     toPromptContext(userQuery = '') {
         const relevant = this.getRelevantProjects(userQuery);
@@ -101,8 +111,8 @@ class ProjectStore {
             return `Active Project Context:\n${details}`;
         }
 
-        // Only inject project roster if the user query is actually project/portfolio-related
-        const isProjectRelated = /(?:project|portfolio|stack|github|balik|emotion|ti-to|ems|employee|zenbot|build|app|code)/i.test(userQuery);
+        // Only inject project roster if the user query is explicitly about projects or portfolio
+        const isProjectRelated = /\b(what projects|my projects|lance's projects|tracked projects|portfolio stack|project list)\b/i.test(userQuery);
         if (isProjectRelated) {
             const roster = this.projects.map(p => `- ${p.name} (${p.category}): ${p.stack?.slice(0, 3).join(', ')}`).join('\n');
             return `Lance's Tracked Projects (High-level awareness):\n${roster}`;

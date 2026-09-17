@@ -2,6 +2,17 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../../utils/logger');
 
+const STOP_WORDS = new Set([
+    'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'any', 'can',
+    'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his',
+    'how', 'man', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy',
+    'did', 'its', 'let', 'put', 'say', 'she', 'too', 'use', 'what', 'with',
+    'your', 'this', 'that', 'from', 'they', 'them', 'have', 'more', 'some',
+    'will', 'just', 'like', 'know', 'about', 'would', 'there', 'their',
+    'been', 'then', 'into', 'come', 'make', 'when', 'which', 'could',
+    'also', 'than', 'other', 'over', 'such', 'even', 'most', 'play', 'team'
+]);
+
 class EpisodicMemory {
     constructor(filePath, maxEntries = 500) {
         this.filePath = filePath;
@@ -38,10 +49,15 @@ class EpisodicMemory {
     add(role, content) {
         if (!content || !content.trim()) return null;
 
+        const cleanContent = content.trim();
+        const storedContent = (role === 'assistant' && cleanContent.length > 250)
+            ? cleanContent.slice(0, 250) + '...'
+            : cleanContent;
+
         const entry = {
             id: `mem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             role,
-            content: content.trim(),
+            content: storedContent,
             ts: Date.now(),
             date: new Date().toISOString()
         };
@@ -60,12 +76,12 @@ class EpisodicMemory {
     /**
      * Hybrid relevance retrieval: keyword frequency + phrase match + recency decay.
      */
-    retrieve(query, topK = 4) {
+    retrieve(query, topK = 2) {
         if (!query || !this.memories.length) return [];
 
         const cleanQuery = query.toLowerCase();
-        const terms = cleanQuery.split(/[^a-z0-9]+/).filter(t => t.length > 2);
-        if (!terms.length) return [];
+        const terms = cleanQuery.split(/[^a-z0-9]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
+        if (!terms.length && cleanQuery.length < 8) return [];
 
         const now = Date.now();
         const oneDayMs = 24 * 60 * 60 * 1000;
@@ -74,16 +90,16 @@ class EpisodicMemory {
             const text = (entry.content || '').toLowerCase();
             let score = 0;
 
-            // 1. Exact phrase match bonus
-            if (cleanQuery.length > 8 && text.includes(cleanQuery)) {
+            // 1. Exact phrase match bonus (meaningful phrases)
+            if (cleanQuery.length > 10 && text.includes(cleanQuery)) {
                 score += 15;
             }
 
-            // 2. Term frequency matching
+            // 2. Term frequency matching on non-stop words
             for (const term of terms) {
                 const count = (text.match(new RegExp('\\b' + term, 'gi')) || []).length;
                 if (count > 0) {
-                    score += count * 3;
+                    score += count * 4;
                 }
             }
 
@@ -94,7 +110,7 @@ class EpisodicMemory {
             }
 
             return { entry, score };
-        }).filter(item => item.score > 2);
+        }).filter(item => item.score >= 6);
 
         // Sort descending by relevance score
         scored.sort((a, b) => b.score - a.score);

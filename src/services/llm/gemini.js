@@ -5,7 +5,7 @@ class GeminiProvider {
         this.apiKey = config.apiKey;
         this.model = config.model || 'gemini-3.1-flash-lite';
         this.fallbackModel = config.fallbackModel || 'gemini-2.5-flash';
-        this.maxTokens = config.maxTokens || 2048;
+        this.maxTokens = config.maxTokens || 500;
         this.temperature = config.temperature ?? 0.7;
         this.name = 'gemini';
     }
@@ -18,14 +18,12 @@ class GeminiProvider {
      * Converts standard {role, content} array into Gemini API schema.
      */
     _formatMessages(messages) {
-        let systemInstruction = null;
+        const systemParts = [];
         const contents = [];
 
         for (const msg of messages) {
             if (msg.role === 'system') {
-                systemInstruction = {
-                    parts: [{ text: msg.content }]
-                };
+                systemParts.push({ text: msg.content });
             } else {
                 contents.push({
                     role: msg.role === 'assistant' ? 'model' : 'user',
@@ -33,6 +31,19 @@ class GeminiProvider {
                 });
             }
         }
+
+        // Add explicit brevity and formatting reinforcement for Gemini
+        systemParts.push({
+            text: (
+                `[CRITICAL DISCORD OUTPUT ENFORCEMENT]\n` +
+                `- You are in a real-time Discord chat. Keep replies short, conversational, and direct (1 to 3 sentences maximum for banter/casual talk).\n` +
+                `- NEVER write multi-paragraph essays, unsolicited advice guides, coaching breakdowns, or "Option 1 / Option 2 / Option 3" lists.\n` +
+                `- If asked to invite friends or teammates to play (e.g. Valorant), call them out directly like a friend in the server; do NOT explain how to invite people.\n` +
+                `- Absolutely ZERO markdown tables.`
+            )
+        });
+
+        const systemInstruction = systemParts.length > 0 ? { parts: systemParts } : null;
 
         // If no user messages were present, ensure at least one
         if (contents.length === 0) {
@@ -58,7 +69,7 @@ class GeminiProvider {
             contents,
             generationConfig: {
                 temperature: options.temperature ?? this.temperature,
-                maxOutputTokens: maxTokensToUse
+                maxOutputTokens: Math.min(maxTokensToUse, 500)
             }
         };
 
