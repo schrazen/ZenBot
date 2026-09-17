@@ -13,11 +13,19 @@ class MessageHandler {
     }
 
     /**
+     * Checks if the message author is an authorized owner/admin.
+     */
+    isOwner(message) {
+        return this.config.discord.allowedUserIds.length === 0 ||
+            this.config.discord.allowedUserIds.includes(message.author.id);
+    }
+
+    /**
      * Determines whether the bot should respond to the message.
      * Supports:
      * 1. Direct Messages (DMs) from authorized users.
-     * 2. Configured test channel messages.
-     * 3. Bot mentions across any server channel.
+     * 2. Mentions (@ZenBot) across any server channel (allows friends/server members).
+     * 3. Any messages inside configured channel(s).
      */
     shouldHandle(message) {
         if (message.author.bot) return false;
@@ -25,26 +33,24 @@ class MessageHandler {
         // Dedup recent message events
         if (this.processedMessageIds.has(message.id)) return false;
 
-        const isAllowedUser = this.config.discord.allowedUserIds.length === 0 ||
-            this.config.discord.allowedUserIds.includes(message.author.id);
-
-        if (!isAllowedUser) return false;
-
-        // 1. Check if Direct Message (DM)
+        // 1. Direct Messages (DMs)
         const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
         if (isDM) {
-            return true;
+            return this.isOwner(message);
         }
 
-        // 2. Check if explicitly mentioned in a server
+        // 2. Server channels: explicitly mentioned (@ZenBot)
         const isMentioned = message.mentions.has(this.client.user.id);
         if (isMentioned) {
             return true;
         }
 
-        // 3. Check if inside the locked/configured channel
-        const isConfiguredChannel = Boolean(this.config.discord.channelId && message.channel.id === this.config.discord.channelId);
-        if (isConfiguredChannel) {
+        // 3. Server channels: inside configured channel(s)
+        const channelIds = this.config.discord.channelIds?.length
+            ? this.config.discord.channelIds
+            : (this.config.discord.channelId ? [this.config.discord.channelId] : []);
+
+        if (channelIds.includes(message.channel.id)) {
             return true;
         }
 
@@ -89,11 +95,26 @@ class MessageHandler {
         }
 
         const userQuery = this.cleanContent(message);
-        if (!userQuery) return;
+        const speakerName = message.member?.displayName || message.author.username;
+        const isOwner = this.isOwner(message);
 
-        const rememberedInline = this.checkInlineMemory(userQuery);
+        // Friendly response if mentioned without any query text
+        if (!userQuery) {
+            if (message.mentions.has(this.client.user.id)) {
+                return await message.reply(`Hey ${speakerName}! What's on your mind? Mention me with a question or use \`!help\` to see what I can do.`);
+            }
+            return;
+        }
 
-        logger.info(`Message [${message.guild ? message.guild.name : 'DM'}] from ${message.author.tag}: "${userQuery.slice(0, 80)}"`);
+        // Only allow owner to inject persistent inline memories
+        const rememberedInline = isOwner ? this.checkInlineMemory(userQuery) : null;
+
+        // Add speaker prefix when friends or server members talk so the LLM has context
+        const promptQuery = (!isOwner && message.guild)
+            ? `[From ${speakerName}]: ${userQuery}`
+            : userQuery;
+
+        logger.info(`Message [${message.guild ? message.guild.name : 'DM'}] from ${message.author.tag} (${speakerName}): "${userQuery.slice(0, 80)}"`);
 
         // Send typing indicator
         try {
@@ -104,7 +125,7 @@ class MessageHandler {
 
         try {
             // Build multi-tier context with projects and temporal awareness
-            const messages = this.memoryManager.buildMessages(message.channel.id, userQuery);
+            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery);
 
             // Execute LLM inference
             const response = await this.llmManager.chat(messages);
@@ -140,7 +161,8 @@ class MessageHandler {
             }
 
             // Persist turns to memory
-            this.memoryManager.recordTurn(message.channel.id, 'user', userQuery);
+            const historyUserTurn = isOwner ? userQuery : `${speakerName}: ${userQuery}`;
+            this.memoryManager.recordTurn(message.channel.id, 'user', historyUserTurn);
             this.memoryManager.recordTurn(message.channel.id, 'assistant', response.content);
 
             logger.success(`Replied via ${response.provider} (${response.model}) in ${response.latencyMs}ms`);

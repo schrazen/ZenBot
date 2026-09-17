@@ -49,11 +49,13 @@ class ZenBot {
             logger.success(`=============================================`);
             logger.success(`ZenBot online as: ${this.client.user.tag}`);
             logger.info(`Active Provider: ${this.llmManager.currentProviderName.toUpperCase()}`);
-            logger.info(`Channel lock: ${this.config.discord.channelId || 'Any'}`);
-            logger.info(`Authorized Users: ${this.config.discord.allowedUserIds.join(', ') || 'All'}`);
+            logger.info(`Channel lock: ${this.config.discord.channelIds?.join(', ') || this.config.discord.channelId || 'Any'}`);
+            logger.info(`Authorized Owners: ${this.config.discord.allowedUserIds.join(', ') || 'All'}`);
+            const servers = this.client.guilds.cache.map(g => `${g.name} (${g.id})`);
+            logger.info(`Connected Servers (${servers.length}): ${servers.join(', ') || 'None'}`);
             logger.success(`=============================================`);
 
-            this.client.user.setActivity('over Lance | !help', { type: ActivityType.Watching });
+            this.client.user.setActivity('Bisaya si Ed | !help', { type: ActivityType.Watching });
         });
 
         this.client.on('messageCreate', async (message) => {

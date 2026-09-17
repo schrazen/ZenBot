@@ -16,6 +16,14 @@ class CommandHandler {
     }
 
     /**
+     * Checks if the message author is an authorized owner/admin.
+     */
+    isOwner(message) {
+        return this.config.discord.allowedUserIds.length === 0 ||
+            this.config.discord.allowedUserIds.includes(message.author.id);
+    }
+
+    /**
      * Dispatches command to specific handlers.
      */
     async handle(message) {
@@ -44,21 +52,27 @@ class CommandHandler {
             case 'ping':
                 return await this.cmdPing(message);
             case 'remember':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can add persistent facts.');
                 return await this.cmdRemember(message, argText);
             case 'facts':
             case 'memories':
                 return await this.cmdListFacts(message, argText);
             case 'forget':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can remove facts.');
                 return await this.cmdForget(message, argText);
             case 'profile':
                 return await this.cmdProfile(message);
             case 'addgoal':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can update profile goals.');
                 return await this.cmdAddGoal(message, argText);
             case 'provider':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can switch active AI providers.');
                 return await this.cmdProvider(message, argText);
             case 'model':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can change LLM models.');
                 return await this.cmdModel(message, argText);
             case 'tokens':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can toggle token indicators.');
                 return await this.cmdTokens(message, argText);
             case 'clear':
                 return await this.cmdClear(message);
@@ -244,6 +258,9 @@ class CommandHandler {
 
         // Subcommand: !project task <id> <task>
         if (args[0].toLowerCase() === 'task') {
+            if (!this.isOwner(message)) {
+                return await message.reply('Only Lance can add tasks to tracked projects.');
+            }
             const projId = args[1];
             const taskText = args.slice(2).join(' ').trim();
             if (!projId || !taskText) {

@@ -22,6 +22,10 @@ const config = {
         clientId: process.env.CLIENT_ID || '',
         guildId: process.env.GUILD_ID || '',
         channelId: process.env.CHANNEL_ID || '',
+        channelIds: (process.env.CHANNEL_ID || '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean),
         allowedUserIds: (process.env.DISCORD_ALLOWED_USERS || process.env.DISCORD_ALLOWED_USER_IDS || '')
             .split(',')
             .map(s => s.trim())
@@ -68,7 +72,8 @@ const config = {
             `CRITICAL DISCORD FORMATTING & PLATFORM CONSTRAINTS:\n` +
             `- You are chatting on Discord. Discord is a fast, conversational chat platform—NOT an email, documentation site, or essay.\n` +
             `- Keep responses compact, punchy, and readable (1 to 3 short paragraphs max by default).\n` +
-            `- NEVER dump massive walls of text. If an explanation is complex, deliver the core solution first and ask if Lance wants to dive deeper.\n` +
+            `- When chatting in Discord server channels with members or Lance's friends, be friendly, warm, and helpful. You are Lance's personal AI peer, so you can share insights about his tech stack and projects if asked, but always be a respectful, cool conversationalist to anyone chatting with you. Address the speaker by their name/handle if provided in [From Name].\n` +
+            `- NEVER dump massive walls of text. If an explanation is complex, deliver the core solution first and ask if they want to dive deeper.\n` +
             `- NEVER output entire 100+ line code files. Only provide targeted, relevant code snippets (10 to 30 lines max) focusing specifically on what changed or what matters. Always tag codeblocks with language names.\n` +
             `- DO NOT draw complex ASCII art boxes or wide flowcharts (e.g. ┌───┐, │ │, └───┘). They break and look terrible on Discord mobile and desktop. Use clean bullet points or simple arrow flows (e.g. Client -> Express API -> MySQL) instead.\n` +
             `- Zero emoji spam. Do not decorate headers, bullet points, or paragraphs with emojis. Write like a real developer chatting on Discord.\n` +
