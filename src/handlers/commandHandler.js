@@ -532,7 +532,7 @@ class CommandHandler {
 
         // 2. Check mentions in command message
         const botId = this.messageHandler?.client?.user?.id || message.client?.user?.id;
-        const mentioned = message.mentions.users.filter(u => u.id !== botId).first();
+        const mentioned = message.mentions?.users ? message.mentions.users.filter(u => u.id !== botId).first() : null;
         if (mentioned) {
             targetUser = mentioned;
         }
@@ -869,6 +869,179 @@ class CommandHandler {
             `Humor intensity set to **Level ${targetLevel}** (${newInfo.label}).\n` +
             `_${newInfo.desc}_`
         );
+    }
+
+    /**
+     * Handles Discord Slash Command interactions (/help, /status, /roll, etc.)
+     */
+    async handleInteraction(interaction) {
+        if (!interaction.isChatInputCommand()) return;
+
+        const cmd = interaction.commandName.toLowerCase();
+        logger.info(`Slash command /${cmd} from ${interaction.user.tag}`);
+
+        let isDeferred = false;
+        const targetUserOption = interaction.options.getUser('target');
+        const usersMap = new Map();
+        if (targetUserOption) usersMap.set(targetUserOption.id, targetUserOption);
+
+        const adapter = {
+            author: interaction.user,
+            member: interaction.member,
+            channel: interaction.channel,
+            guild: interaction.guild,
+            client: interaction.client,
+            createdTimestamp: interaction.createdTimestamp,
+            mentions: {
+                users: {
+                    filter: (fn) => {
+                        const arr = Array.from(usersMap.values()).filter(fn);
+                        return {
+                            first: () => arr[0] || null
+                        };
+                    }
+                }
+            },
+            async reply(options) {
+                const payload = typeof options === 'string' ? { content: options } : options;
+                if (interaction.replied) {
+                    return await interaction.followUp(payload);
+                } else if (isDeferred || interaction.deferred) {
+                    return await interaction.editReply(payload);
+                } else {
+                    return await interaction.reply(payload);
+                }
+            }
+        };
+
+        const defer = async () => {
+            if (!isDeferred && !interaction.replied && !interaction.deferred) {
+                await interaction.deferReply();
+                isDeferred = true;
+            }
+        };
+
+        try {
+            switch (cmd) {
+                case 'help':
+                    return await this.cmdHelp(adapter);
+
+                case 'status':
+                    return await this.cmdStatus(adapter);
+
+                case 'limits':
+                case 'usage':
+                    return await this.cmdLimits(adapter);
+
+                case 'humor':
+                case 'intensity': {
+                    const level = interaction.options.getInteger('level');
+                    return await this.cmdHumor(adapter, level !== null ? String(level) : '');
+                }
+
+                case 'roast':
+                case 'cook':
+                case 'petty': {
+                    await defer();
+                    const target = interaction.options.getUser('target');
+                    const name = interaction.options.getString('name') || '';
+                    const topic = interaction.options.getString('topic') || '';
+
+                    const roastArgs = [];
+                    if (target) {
+                        roastArgs.push(`<@${target.id}>`);
+                    } else if (name) {
+                        roastArgs.push(name);
+                    }
+                    if (topic) {
+                        roastArgs.push(topic);
+                    }
+                    return await this.cmdRoast(adapter, roastArgs);
+                }
+
+                case 'roll':
+                case 'r':
+                case 'dice': {
+                    const query = interaction.options.getString('query') || '';
+                    const parts = query.split(/\s+/).filter(Boolean);
+                    if (parts.length > 1 || (parts.length === 1 && !/^(\d{1,2})?d(\d{1,4})/i.test(parts[0]))) {
+                        await defer();
+                    }
+                    return await this.cmdRoll(adapter, parts);
+                }
+
+                case 'choose': {
+                    const opts = interaction.options.getString('options') || '';
+                    return await this.cmdChoose(adapter, [opts]);
+                }
+
+                case 'coin':
+                    return await this.cmdCoin(adapter);
+
+                case 'summarize': {
+                    await defer();
+                    const target = interaction.options.getString('channel') || '';
+                    const count = interaction.options.getInteger('count');
+                    const args = [];
+                    if (target) args.push(target);
+                    if (count) args.push(String(count));
+                    return await this.cmdSummarize(adapter, args);
+                }
+
+                case 'projects':
+                    return await this.cmdProjects(adapter);
+
+                case 'project': {
+                    const name = interaction.options.getString('name') || '';
+                    return await this.cmdProject(adapter, name.split(/\s+/));
+                }
+
+                case 'standup':
+                    return await this.cmdStandup(adapter);
+
+                case 'facts':
+                case 'memories': {
+                    const search = interaction.options.getString('search') || '';
+                    return await this.cmdListFacts(adapter, search);
+                }
+
+                case 'profile':
+                    return await this.cmdProfile(adapter);
+
+                case 'ping':
+                    return await this.cmdPing(adapter);
+
+                case 'clear':
+                    return await this.cmdClear(adapter);
+
+                case 'provider': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can switch active AI providers.');
+                    }
+                    const name = interaction.options.getString('name') || '';
+                    return await this.cmdProvider(adapter, name);
+                }
+
+                case 'model': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can change LLM models.');
+                    }
+                    const name = interaction.options.getString('name') || '';
+                    return await this.cmdModel(adapter, name);
+                }
+
+                default:
+                    return await adapter.reply(`Unknown slash command \`/${cmd}\`.`);
+            }
+        } catch (err) {
+            logger.error(`Error executing slash command /${cmd}:`, err);
+            const errReply = { content: `Error executing command: ${err.message}`, ephemeral: true };
+            if (interaction.deferred || isDeferred) {
+                return await interaction.editReply(errReply);
+            } else if (!interaction.replied) {
+                return await interaction.reply(errReply);
+            }
+        }
     }
 }
 

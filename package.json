@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
+    "register:slash": "node -e \"require('./src/handlers/slashCommands').registerSlashCommands(require('./src/config'))\"",
     "test:llm": "node -e \"const LLM = require('./src/services/llm'); const c = require('./src/config'); const m = new LLM(c); m.chat([{role:'user', content:'Hi'}], {}).then(r=>console.log(r)).catch(console.error);\""
   },
   "repository": {

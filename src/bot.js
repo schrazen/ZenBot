@@ -5,6 +5,7 @@ const MemoryManager = require('./services/memory');
 const CommandHandler = require('./handlers/commandHandler');
 const MessageHandler = require('./handlers/messageHandler');
 const ChannelHistoryService = require('./services/channelHistory');
+const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
 class ZenBot {
@@ -59,7 +60,12 @@ class ZenBot {
             logger.info(`Connected Servers (${servers.length}): ${servers.join(', ') || 'None'}`);
             logger.success(`=============================================`);
 
-            this.client.user.setActivity('Bisaya si Ed | !help', { type: ActivityType.Watching });
+            this.client.user.setActivity('Bisaya si Ed | /help', { type: ActivityType.Watching });
+
+            // Ensure slash commands are synced with Discord on startup
+            registerSlashCommands(this.config).catch(err => {
+                logger.error('Background slash command registration error:', err.message);
+            });
         });
 
         this.client.on('messageCreate', async (message) => {
@@ -67,6 +73,14 @@ class ZenBot {
                 await this.messageHandler.handle(message);
             } catch (err) {
                 logger.error('Unhandled error in messageCreate event:', err);
+            }
+        });
+
+        this.client.on(Events.InteractionCreate, async (interaction) => {
+            try {
+                await this.commandHandler.handleInteraction(interaction);
+            } catch (err) {
+                logger.error('Unhandled error in interactionCreate event:', err);
             }
         });
 
