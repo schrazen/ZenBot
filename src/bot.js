@@ -6,6 +6,7 @@ const CommandHandler = require('./handlers/commandHandler');
 const MessageHandler = require('./handlers/messageHandler');
 const ChannelHistoryService = require('./services/channelHistory');
 const OwnerAvailabilityService = require('./services/ownerAvailability');
+const StudyService = require('./services/studyService');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -35,13 +36,18 @@ class ZenBot {
             config: this.config,
             client: this.client
         });
+        this.studyService = new StudyService({
+            config: this.config,
+            llmManager: this.llmManager
+        });
 
         this.commandHandler = new CommandHandler({
             config: this.config,
             llmManager: this.llmManager,
             memoryManager: this.memoryManager,
             channelHistory: this.channelHistory,
-            ownerAvailability: this.ownerAvailability
+            ownerAvailability: this.ownerAvailability,
+            studyService: this.studyService
         });
 
         this.messageHandler = new MessageHandler({
@@ -51,7 +57,8 @@ class ZenBot {
             commandHandler: this.commandHandler,
             channelHistory: this.channelHistory,
             client: this.client,
-            ownerAvailability: this.ownerAvailability
+            ownerAvailability: this.ownerAvailability,
+            studyService: this.studyService
         });
 
         this.commandHandler.messageHandler = this.messageHandler;

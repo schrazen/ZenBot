@@ -2,7 +2,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -10,6 +10,7 @@ class MessageHandler {
         this.channelHistory = channelHistory;
         this.client = client;
         this.ownerAvailability = ownerAvailability;
+        this.studyService = studyService;
         this.processedMessageIds = new Set();
         this.showTokens = false;
     }
@@ -25,9 +26,10 @@ class MessageHandler {
     /**
      * Determines whether the bot should respond to the message.
      * Supports:
-     * 1. Direct Messages (DMs) from authorized users.
-     * 2. Mentions (@ZenBot) across any server channel (allows friends/server members).
-     * 3. Any messages inside configured channel(s).
+     * 1. Active study review session in this channel.
+     * 2. Direct Messages (DMs) from authorized users.
+     * 3. Mentions (@ZenBot) across any server channel (allows friends/server members).
+     * 4. Any messages inside configured channel(s).
      */
     shouldHandle(message) {
         if (message.author.bot) return false;
@@ -35,19 +37,27 @@ class MessageHandler {
         // Dedup recent message events
         if (this.processedMessageIds.has(message.id)) return false;
 
-        // 1. Direct Messages (DMs) - STRICTLY OWNER ONLY
+        // 1. Active study review session in this channel
+        if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
+            const session = this.studyService.getSession(message.channel.id);
+            if (session && (session.userId === message.author.id || this.isOwner(message))) {
+                return true;
+            }
+        }
+
+        // 2. Direct Messages (DMs) - STRICTLY OWNER ONLY
         const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
         if (isDM) {
             return this.isOwner(message);
         }
 
-        // 2. Server channels: explicitly mentioned (@ZenBot)
+        // 3. Server channels: explicitly mentioned (@ZenBot)
         const isMentioned = message.mentions.has(this.client.user.id);
         if (isMentioned) {
             return true;
         }
 
-        // 3. Server channels: inside configured channel(s)
+        // 4. Server channels: inside configured channel(s)
         const channelIds = this.config.discord.channelIds?.length
             ? this.config.discord.channelIds
             : (this.config.discord.channelId ? [this.config.discord.channelId] : []);
@@ -119,8 +129,90 @@ class MessageHandler {
         const userQuery = this.cleanContent(message);
         const speakerName = message.member?.displayName || message.author.username;
 
+        // 3. Active Acads / Study Review Session in this channel
+        if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
+            const session = this.studyService.getSession(message.channel.id);
+            if (session && (session.userId === message.author.id || isOwner)) {
+                const lower = userQuery.trim().toLowerCase();
+                if (['stop', 'quit', 'exit', 'cancel', 'end'].includes(lower)) {
+                    const score = this.studyService.endSession(message.channel.id);
+                    if (score && score.total > 0) {
+                        return await message.reply(`🛑 **Study Session Ended.**\nScore so far: **${score.correct}/${score.total}** (${score.percentage}%)\nGreat job! Reply \`quiz me\` anytime to try again.`);
+                    }
+                    return await message.reply('🛑 **Study Session Ended.**');
+                }
+
+                try {
+                    await message.channel.sendTyping();
+                } catch (e) {}
+
+                const result = await this.studyService.evaluateAnswer(message.channel.id, userQuery);
+                if (result.finished) {
+                    const finalReply = `${result.feedback}\n\n🎉 **Deck Complete!**\nFinal Score: **${result.score.correct}/${result.score.total}** (${result.score.percentage}%)\nType \`quiz me\` or \`!quiz\` whenever you want to review again!`;
+                    return await message.reply(finalReply);
+                }
+
+                // MODE 3: GRADING:
+                // 1. If correct: Reply "Correct!" and immediately output the next random [Description].
+                // 2. If incorrect: Reply "Incorrect. The answer is: [Word Answer]" and immediately output the next random [Description].
+                const replyText = `${result.feedback}\n\n**${result.nextDescription}**`;
+                return await message.reply(replyText);
+            }
+        }
+
+        // 4. Natural Study Triggers (Mode 2: Review)
+        const reviewTriggerRegex = /^(?:quiz me|review|start quiz|test me|quiz|review notes)(?:\s+(?:on|for|deck)?\s*([a-z0-9_-]+))?$/i;
+        const reviewMatch = userQuery.match(reviewTriggerRegex);
+        if (reviewMatch && this.studyService) {
+            const deckName = reviewMatch[1] ? reviewMatch[1].trim() : 'acads';
+            const review = this.studyService.startReview(message.channel.id, message.author.id, deckName);
+            if (!review.success) {
+                return await message.reply(review.message);
+            }
+            return await message.reply(`📚 **Review Started** [Deck: *${review.deckName}* | ${review.totalCards} cards]\nType your answer directly in chat, or type **"stop"** to quit anytime.\n\n**${review.description}**`);
+        }
+
+        // Check for attached text/markdown file
+        let attachmentText = null;
+        if (message.attachments?.size > 0) {
+            const textAtt = message.attachments.find(att =>
+                att.name?.endsWith('.txt') || att.name?.endsWith('.md')
+            );
+            if (textAtt && textAtt.size < 500000) {
+                try {
+                    const res = await fetch(textAtt.url);
+                    attachmentText = await res.text();
+                } catch (err) {
+                    logger.warn(`Could not fetch attachment text: ${err.message}`);
+                }
+            }
+        }
+
+        // 5. Natural Notes Ingestion Trigger (Mode 1: Ingestion)
+        const notesTriggerRegex = /^(?:notes|study|acads|flashcards|save notes|add notes):\s*([\s\S]*)$/i;
+        const notesMatch = userQuery.match(notesTriggerRegex);
+        if ((notesMatch || (attachmentText && userQuery.toLowerCase().includes('notes'))) && this.studyService) {
+            const rawNotes = (notesMatch ? notesMatch[1] : (userQuery + '\n' + (attachmentText || ''))).trim();
+            const combinedContent = attachmentText ? `${rawNotes}\n\n${attachmentText}` : rawNotes;
+            if (combinedContent.length > 5) {
+                try {
+                    await message.channel.sendTyping();
+                } catch (e) {}
+
+                const res = await this.studyService.ingestNotes(combinedContent, 'acads');
+                if (res.success && res.addedCount > 0) {
+                    // MODE 1: Reply ONLY with brief confirmation of count and ask if ready. Do not list terms.
+                    return await message.reply(`Saved **${res.addedCount}** terms for review! Ready to begin? (Reply **"Quiz me"** when you're ready)`);
+                } else if (res.success) {
+                    return await message.reply(`No distinct terms and definitions could be extracted from those notes. Make sure to provide concepts with descriptions or definitions!`);
+                } else {
+                    return await message.reply(`Failed to process notes: ${res.error || 'Unknown error'}`);
+                }
+            }
+        }
+
         // Friendly response if mentioned without any query text
-        if (!userQuery) {
+        if (!userQuery && !attachmentText) {
             if (message.mentions.has(this.client.user.id)) {
                 return await message.reply(`Hey ${speakerName}! What's on your mind? Mention me with a question or use \`!help\` to see what I can do.`);
             }

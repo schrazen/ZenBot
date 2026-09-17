@@ -161,6 +161,54 @@ const slashCommands = [
             opt.setName('duration')
                 .setDescription('Optional duration for away/sleep (e.g. 2h, 30m, 6h)')
                 .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('study')
+        .setDescription('Interactive Acads Study Companion (ingest notes, review flashcards, quiz)')
+        .addSubcommand(sub =>
+            sub.setName('notes')
+                .setDescription('Ingest raw notes into [Description -> Word Answer] pairs silently')
+                .addStringOption(opt =>
+                    opt.setName('text')
+                        .setDescription('Notes content to parse and save')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('quiz')
+                .setDescription('Start an interactive quiz session')
+                .addStringOption(opt =>
+                    opt.setName('deck')
+                        .setDescription('Deck name (default: acads)')
+                        .setRequired(false)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('stop')
+                .setDescription('End current review session')
+        )
+        .addSubcommand(sub =>
+            sub.setName('decks')
+                .setDescription('List flashcard decks and card counts')
+        )
+        .addSubcommand(sub =>
+            sub.setName('clear')
+                .setDescription('Clear a flashcard deck')
+                .addStringOption(opt =>
+                    opt.setName('deck')
+                        .setDescription('Deck name to clear (default: acads)')
+                        .setRequired(false)
+                )
+        ),
+
+    new SlashCommandBuilder()
+        .setName('quiz')
+        .setDescription('Quickly start an acads study quiz')
+        .addStringOption(opt =>
+            opt.setName('deck')
+                .setDescription('Deck name (default: acads)')
+                .setRequired(false)
         )
 ];
 
