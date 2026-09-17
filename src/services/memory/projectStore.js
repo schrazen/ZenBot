@@ -101,9 +101,14 @@ class ProjectStore {
             return `Active Project Context:\n${details}`;
         }
 
-        // Compact roster for general awareness
-        const roster = this.projects.map(p => `- ${p.name} (${p.category}): ${p.stack?.slice(0, 3).join(', ')}`).join('\n');
-        return `Lance's Tracked Projects (High-level awareness):\n${roster}`;
+        // Only inject project roster if the user query is actually project/portfolio-related
+        const isProjectRelated = /(?:project|portfolio|stack|github|balik|emotion|ti-to|ems|employee|zenbot|build|app|code)/i.test(userQuery);
+        if (isProjectRelated) {
+            const roster = this.projects.map(p => `- ${p.name} (${p.category}): ${p.stack?.slice(0, 3).join(', ')}`).join('\n');
+            return `Lance's Tracked Projects (High-level awareness):\n${roster}`;
+        }
+
+        return null;
     }
 }
 

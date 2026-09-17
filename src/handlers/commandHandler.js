@@ -544,8 +544,23 @@ class CommandHandler {
         } else if (args.length > 0) {
             targetName = args[0];
             reason = args.slice(1).join(' ').trim();
-        } else {
-            return await message.reply('Give me a victim: reply to their message with `!roast`, or use `!roast @user [optional topic]`.');
+        }
+
+        // 4. If target is "him" or empty, resolve to the last person who spoke in the channel
+        if ((!targetUser && (!targetName || targetName.toLowerCase() === 'him')) && message.channel.isTextBased()) {
+            try {
+                const recent = await message.channel.messages.fetch({ limit: 6 });
+                const lastOtherMsg = recent.find(m => m.id !== message.id && m.author.id !== message.author.id && !m.author.bot);
+                if (lastOtherMsg) {
+                    targetUser = lastOtherMsg.author;
+                    targetName = lastOtherMsg.member?.displayName || lastOtherMsg.author.username;
+                    targetContent = lastOtherMsg.content;
+                }
+            } catch (e) {}
+        }
+
+        if (!targetName) {
+            return await message.reply('Give me a victim: reply to their message with `!roast`, tag them (`!roast @user`), or use `!roast him`.');
         }
 
         try {
@@ -572,6 +587,21 @@ class CommandHandler {
         if (reason) {
             promptContent += `Context / ammunition from Lance: "${reason}"\n`;
         }
+
+        // Special inside lore for Ed (edvtl)
+        const isEd = targetName.toLowerCase().includes('ed') ||
+            targetUser?.username?.toLowerCase().includes('ed') ||
+            targetUser?.displayName?.toLowerCase().includes('ed') ||
+            reason.toLowerCase().includes('ed');
+
+        if (isEd) {
+            promptContent += `\nSPECIAL INSIDE LORE AGAINST ED:\n` +
+                `- He is Bisaya (the whole server's favorite joke; bot status is 'Bisaya si Ed').\n` +
+                `- He is a certified simp who immediately ditches, ghosts, and abandons his friends/homies the second his girlfriend breathes.\n` +
+                `- He has zero loyalty to the squad, drops the boys mid-game or mid-call for his girl.\n` +
+                `- Roast him brutally and specifically for abandoning his friends for his girl and being Bisaya.\n`;
+        }
+
         promptContent += `Cook them with maximum pettiness.`;
 
         try {
