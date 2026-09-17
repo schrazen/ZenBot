@@ -5,11 +5,12 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager, channelHistory }) {
+    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
         this.channelHistory = channelHistory;
+        this.ownerAvailability = ownerAvailability;
     }
 
     /**
@@ -23,8 +24,9 @@ class CommandHandler {
      * Checks if the message author is an authorized owner/admin.
      */
     isOwner(message) {
+        const userId = message?.author?.id || message?.user?.id || message?.id;
         return this.config.discord.allowedUserIds.length === 0 ||
-            this.config.discord.allowedUserIds.includes(message.author.id);
+            (userId && this.config.discord.allowedUserIds.includes(userId));
     }
 
     /**
@@ -107,6 +109,9 @@ class CommandHandler {
                 return await this.cmdSummarize(message, args);
             case 'clear':
                 return await this.cmdClear(message);
+            case 'availability':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can manage availability status.');
+                return await this.cmdAvailability(message, argText);
             default:
                 return await message.reply(`Unknown command \`!${cmd}\`. Use \`!help\` to see the full list.`);
         }
@@ -123,20 +128,19 @@ class CommandHandler {
                     value: (
                         '`!projects` — Overview of active projects & tech stacks\n' +
                         '`!project <name>` — Detailed architecture & tasks for a project\n' +
-                        '`!project task <name> <task>` — Add a task to a project (Owner only)\n' +
                         '`!standup` — Daily planning check-in based on goals & projects'
                     )
                 },
                 {
-                    name: 'Dice & Decisions (D&D)',
+                    name: 'Fun & Utilities',
                     value: (
-                        '`!roll [dice] [action]` — Roll D&D dice with DM outcomes (e.g. `!roll d20 sneak past guards`, `!roll 2d6+3`, `!roll deploy to prod`)\n' +
-                        '`!choose <opt1>, <opt2>, <opt3>` — Let fate pick between options (or `!choose sleep or code`)\n' +
-                        '`!coin` — Flip a coin'
+                        '`!roll [d20|2d6+3|action]` — Roll dice with D&D outcome commentary (e.g. `!roll d20 sneak into kitchen`)\n' +
+                        '`!choose <opt1, opt2...>` — Let fate pick between options\n' +
+                        '`!coin` — Flip a coin (Heads or Tails)'
                     )
                 },
                 {
-                    name: 'Chat History & Summaries',
+                    name: 'Discord History & Context',
                     value: (
                         '`!summarize [channel|server|count]` — Summarize chat from this or another channel (e.g. `!summarize banorant`, `!summarize 50`)\n' +
                         '`!catchup` / `!recap` — Catch up on recent discussions\n' +
@@ -162,6 +166,7 @@ class CommandHandler {
                 {
                     name: 'Owner Controls (Lance Only)',
                     value: (
+                        '`!availability [status|on|off|away|sleep|auto] [duration]` — Owner availability & auto-reply detection\n' +
                         '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord (or reply with `!roast`)\n' +
                         '`!humor <0-5>` — Set humor intensity (0=serious, 2=natural, 4=shitpost, 5=degeneracy)\n' +
                         '`!provider <groq|gemini>` — Switch active AI provider\n' +
@@ -172,7 +177,7 @@ class CommandHandler {
                 },
                 {
                     name: 'Usage',
-                    value: 'Chat directly in this channel, mention `@ZenBot` in any server, or send a DM anytime.'
+                    value: 'Chat directly in this channel, mention `@ZenBot` in any server, or send a DM anytime (owner only).'
                 }
             )
             .setFooter({ text: 'ZenBot' })
@@ -872,13 +877,56 @@ class CommandHandler {
     }
 
     /**
+     * Manages Lance's availability & inactivity detection status or manual override.
+     */
+    async cmdAvailability(message, argText) {
+        if (!this.ownerAvailability) {
+            return await message.reply('Owner availability service is not initialized.');
+        }
+
+        const raw = (argText || '').trim();
+        if (!raw || raw.toLowerCase() === 'status') {
+            const embed = this.ownerAvailability.getStatusEmbed();
+            return await message.reply({ embeds: [embed] });
+        }
+
+        const [action, ...durationParts] = raw.split(/\s+/);
+        const duration = durationParts.join(' ').trim();
+        const result = this.ownerAvailability.setManualState(action, duration);
+
+        if (result.error) {
+            return await message.reply(`⚠️ ${result.error}`);
+        }
+
+        return await message.reply(`✅ ${result.message}`);
+    }
+
+    /**
      * Handles Discord Slash Command interactions (/help, /status, /roll, etc.)
      */
     async handleInteraction(interaction) {
         if (!interaction.isChatInputCommand()) return;
 
+        // Strict DM restriction: only the owner can interact with the bot in DMs
+        if (!interaction.guild && !this.isOwner(interaction.user)) {
+            logger.warn(`Rejected DM slash command from unauthorized user ${interaction.user.tag} (${interaction.user.id})`);
+            return await interaction.reply({
+                content: 'ZenBot direct messages are private and restricted to the bot owner.',
+                ephemeral: true
+            });
+        }
+
         const cmd = interaction.commandName.toLowerCase();
         logger.info(`Slash command /${cmd} from ${interaction.user.tag}`);
+
+        // Record owner activity if Lance invoked a slash command
+        if (this.ownerAvailability && this.isOwner(interaction.user)) {
+            this.ownerAvailability.recordActivity({
+                type: 'bot_interaction',
+                channelId: interaction.channelId,
+                guildId: interaction.guildId
+            });
+        }
 
         let isDeferred = false;
         const targetUserOption = interaction.options.getUser('target');
@@ -1028,6 +1076,16 @@ class CommandHandler {
                     }
                     const name = interaction.options.getString('name') || '';
                     return await this.cmdModel(adapter, name);
+                }
+
+                case 'availability': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can manage availability status.');
+                    }
+                    const action = interaction.options.getString('action') || 'status';
+                    const duration = interaction.options.getString('duration') || '';
+                    const argStr = `${action} ${duration}`.trim();
+                    return await this.cmdAvailability(adapter, argStr);
                 }
 
                 default:

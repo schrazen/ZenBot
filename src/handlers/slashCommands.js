@@ -140,6 +140,27 @@ const slashCommands = [
             opt.setName('name')
                 .setDescription('Model name')
                 .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('availability')
+        .setDescription("View or set Lance's availability & inactivity detection (Owner only)")
+        .addStringOption(opt =>
+            opt.setName('action')
+                .setDescription('Status action (status, on, off, away, sleep, auto)')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'status (Show current inferred status)', value: 'status' },
+                    { name: 'on (Mark available / online)', value: 'on' },
+                    { name: 'away (Mark away / AFK)', value: 'away' },
+                    { name: 'sleep (Mark asleep)', value: 'sleep' },
+                    { name: 'auto (Reset to automatic detection)', value: 'auto' }
+                )
+        )
+        .addStringOption(opt =>
+            opt.setName('duration')
+                .setDescription('Optional duration for away/sleep (e.g. 2h, 30m, 6h)')
+                .setRequired(false)
         )
 ];
 

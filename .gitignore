@@ -14,6 +14,7 @@ data/memories.json
 data/facts.json
 data/profile.json
 data/projects.json
+data/owner_activity.json
 
 # Legacy local files
 legacy/

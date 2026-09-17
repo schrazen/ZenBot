@@ -2,13 +2,14 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
         this.commandHandler = commandHandler;
         this.channelHistory = channelHistory;
         this.client = client;
+        this.ownerAvailability = ownerAvailability;
         this.processedMessageIds = new Set();
         this.showTokens = false;
     }
@@ -34,7 +35,7 @@ class MessageHandler {
         // Dedup recent message events
         if (this.processedMessageIds.has(message.id)) return false;
 
-        // 1. Direct Messages (DMs)
+        // 1. Direct Messages (DMs) - STRICTLY OWNER ONLY
         const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
         if (isDM) {
             return this.isOwner(message);
@@ -84,7 +85,27 @@ class MessageHandler {
     }
 
     async handle(message) {
-        if (!this.shouldHandle(message)) return;
+        if (message.author.bot) return;
+
+        const isOwner = this.isOwner(message);
+
+        // 1. Record owner activity whenever Lance sends any message in any channel
+        if (isOwner && this.ownerAvailability) {
+            this.ownerAvailability.recordActivity({
+                type: 'message',
+                channelId: message.channel.id,
+                guildId: message.guild?.id
+            });
+        }
+
+        // 2. If message should NOT be handled as a direct ZenBot interaction,
+        // run the smart owner availability / inactivity scanner for server messages!
+        if (!this.shouldHandle(message)) {
+            if (this.ownerAvailability && message.guild && !isOwner) {
+                await this.ownerAvailability.checkAndRespond(message);
+            }
+            return;
+        }
 
         // Mark processed with TTL
         this.processedMessageIds.add(message.id);
@@ -97,7 +118,6 @@ class MessageHandler {
 
         const userQuery = this.cleanContent(message);
         const speakerName = message.member?.displayName || message.author.username;
-        const isOwner = this.isOwner(message);
 
         // Friendly response if mentioned without any query text
         if (!userQuery) {
@@ -107,13 +127,33 @@ class MessageHandler {
             return;
         }
 
+        // 3. Inspect referenced reply message (if user is replying to someone else)
+        let referencedContext = null;
+        if (message.reference && message.reference.messageId) {
+            try {
+                const refMsg = await message.channel.messages.fetch(message.reference.messageId);
+                if (refMsg) {
+                    const refAuthor = refMsg.member?.displayName || refMsg.author.username;
+                    referencedContext = `[Replying to ${refAuthor}'s message]: "${refMsg.cleanContent || refMsg.content}"`;
+                }
+            } catch (e) {
+                logger.warn(`Could not fetch referenced message for context: ${e.message}`);
+            }
+        }
+
         // Only allow owner to inject persistent inline memories
         const rememberedInline = isOwner ? this.checkInlineMemory(userQuery) : null;
 
+        // Combine referenced message context and user query
+        let fullUserText = userQuery;
+        if (referencedContext) {
+            fullUserText = `${referencedContext}\n\n${userQuery}`;
+        }
+
         // Add speaker prefix when friends or server members talk so the LLM has context
         const promptQuery = (!isOwner && message.guild)
-            ? `[From ${speakerName}]: ${userQuery}`
-            : userQuery;
+            ? `[From ${speakerName}]: ${fullUserText}`
+            : fullUserText;
 
         logger.info(`Message [${message.guild ? message.guild.name : 'DM'}] from ${message.author.tag} (${speakerName}): "${userQuery.slice(0, 80)}"`);
 

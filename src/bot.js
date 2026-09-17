@@ -5,6 +5,7 @@ const MemoryManager = require('./services/memory');
 const CommandHandler = require('./handlers/commandHandler');
 const MessageHandler = require('./handlers/messageHandler');
 const ChannelHistoryService = require('./services/channelHistory');
+const OwnerAvailabilityService = require('./services/ownerAvailability');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -16,23 +17,31 @@ class ZenBot {
                 GatewayIntentBits.Guilds,
                 GatewayIntentBits.GuildMessages,
                 GatewayIntentBits.MessageContent,
-                GatewayIntentBits.DirectMessages
+                GatewayIntentBits.DirectMessages,
+                GatewayIntentBits.GuildVoiceStates,
+                GatewayIntentBits.GuildMessageReactions
             ],
             partials: [
                 Partials.Channel,
-                Partials.Message
+                Partials.Message,
+                Partials.Reaction
             ]
         });
 
         this.llmManager = new LLMManager(this.config);
         this.memoryManager = new MemoryManager(this.config);
         this.channelHistory = new ChannelHistoryService(this.client);
+        this.ownerAvailability = new OwnerAvailabilityService({
+            config: this.config,
+            client: this.client
+        });
 
         this.commandHandler = new CommandHandler({
             config: this.config,
             llmManager: this.llmManager,
             memoryManager: this.memoryManager,
-            channelHistory: this.channelHistory
+            channelHistory: this.channelHistory,
+            ownerAvailability: this.ownerAvailability
         });
 
         this.messageHandler = new MessageHandler({
@@ -41,7 +50,8 @@ class ZenBot {
             memoryManager: this.memoryManager,
             commandHandler: this.commandHandler,
             channelHistory: this.channelHistory,
-            client: this.client
+            client: this.client,
+            ownerAvailability: this.ownerAvailability
         });
 
         this.commandHandler.messageHandler = this.messageHandler;
@@ -81,6 +91,28 @@ class ZenBot {
                 await this.commandHandler.handleInteraction(interaction);
             } catch (err) {
                 logger.error('Unhandled error in interactionCreate event:', err);
+            }
+        });
+
+        this.client.on('voiceStateUpdate', (oldState, newState) => {
+            try {
+                this.ownerAvailability.updateVoiceState(oldState, newState);
+            } catch (err) {
+                logger.error('Error in voiceStateUpdate event:', err);
+            }
+        });
+
+        this.client.on('messageReactionAdd', async (reaction, user) => {
+            try {
+                if (this.ownerAvailability.isOwner(user?.id)) {
+                    this.ownerAvailability.recordActivity({
+                        type: 'reaction',
+                        channelId: reaction.message?.channel?.id,
+                        guildId: reaction.message?.guild?.id
+                    });
+                }
+            } catch (err) {
+                logger.error('Error in messageReactionAdd event:', err);
             }
         });
 
