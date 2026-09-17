@@ -122,3 +122,4 @@ class ChannelHistoryService {
 }
 
 module.exports = ChannelHistoryService;
+

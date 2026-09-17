@@ -77,10 +77,23 @@ class CommandHandler {
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can toggle token indicators.');
                 return await this.cmdTokens(message, argText);
             case 'roast':
-            case 'roast':
             case 'cook':
             case 'petty':
                 return await this.cmdRoast(message, args);
+            case 'roll':
+            case 'r':
+            case 'dice':
+            case 'dnd':
+            case 'check':
+                return await this.cmdRoll(message, args);
+            case 'choose':
+            case 'pick':
+            case 'decide':
+            case 'fate':
+                return await this.cmdChoose(message, args);
+            case 'coin':
+            case 'flip':
+                return await this.cmdCoin(message);
             case 'summarize':
             case 'catchup':
             case 'recap':
@@ -106,6 +119,14 @@ class CommandHandler {
                         '`!project <name>` — Detailed architecture & tasks for a project\n' +
                         '`!project task <name> <task>` — Add a task to a project (Owner only)\n' +
                         '`!standup` — Daily planning check-in based on goals & projects'
+                    )
+                },
+                {
+                    name: 'Dice & Decisions (D&D)',
+                    value: (
+                        '`!roll [dice] [action]` — Roll D&D dice with DM outcomes (e.g. `!roll d20 sneak past guards`, `!roll 2d6+3`, `!roll deploy to prod`)\n' +
+                        '`!choose <opt1>, <opt2>, <opt3>` — Let fate pick between options (or `!choose sleep or code`)\n' +
+                        '`!coin` — Flip a coin'
                     )
                 },
                 {
@@ -628,6 +649,121 @@ class CommandHandler {
             logger.error(`Failed to summarize channel #${channelName}: ${err.message}`);
             return await message.reply(`Error generating summary for #${channelName}: ${err.message}`);
         }
+    }
+
+    async cmdRoll(message, args) {
+        const raw = args.join(' ').trim();
+        const diceRegex = /^(\d{1,2})?d(\d{1,4})(?:([+-])(\d{1,3}))?$/i;
+
+        let count = 1;
+        let sides = 20;
+        let mod = 0;
+        let action = '';
+
+        if (args.length > 0 && diceRegex.test(args[0])) {
+            const match = args[0].match(diceRegex);
+            count = match[1] ? Math.min(parseInt(match[1], 10), 30) : 1;
+            sides = Math.min(parseInt(match[2], 10), 1000);
+            if (match[3] && match[4]) {
+                const val = parseInt(match[4], 10);
+                mod = match[3] === '-' ? -val : val;
+            }
+            action = args.slice(1).join(' ').trim();
+        } else {
+            action = raw;
+            count = 1;
+            sides = 20;
+        }
+
+        const rolls = [];
+        for (let i = 0; i < count; i++) {
+            rolls.push(Math.floor(Math.random() * sides) + 1);
+        }
+        const sum = rolls.reduce((a, b) => a + b, 0);
+        const total = sum + mod;
+
+        let tier = 'Standard';
+        if (sides === 20 && count === 1) {
+            if (rolls[0] === 20) tier = 'CRITICAL SUCCESS (Nat 20)';
+            else if (rolls[0] === 1) tier = 'CRITICAL FAILURE (Nat 1)';
+            else if (total >= 15) tier = 'SUCCESS';
+            else if (total >= 10) tier = 'MIXED SUCCESS';
+            else tier = 'FAILURE';
+        }
+
+        const modStr = mod !== 0 ? (mod > 0 ? `+${mod}` : `${mod}`) : '';
+        const rollDisplay = count === 1 && mod === 0 ? `**${total}**` : `[${rolls.join(', ')}]${modStr ? ' ' + modStr : ''} = **${total}**`;
+
+        // If no narrative action provided, return fast instant calculation
+        if (!action) {
+            let replyText = `🎲 Rolled **${count}d${sides}${modStr}**: ${rollDisplay}`;
+            if (sides === 20 && count === 1) {
+                replyText += ` — **${tier}**`;
+            }
+            return await message.reply(replyText);
+        }
+
+        // Narrative action provided: generate witty D&D DM adjudication
+        try {
+            await message.channel.sendTyping();
+        } catch (e) {}
+
+        const speakerName = message.member?.displayName || message.author.username;
+        const dmPrompt = (
+            `You are ZenBot acting as a witty, deadpan D&D Dungeon Master in a Discord chat. ` +
+            `The player (${speakerName}) made a D&D check or decision on: "${action}". ` +
+            `They rolled ${total} on a d${sides}${modStr} -> Result: ${tier}.\n\n` +
+            `RULES:\n` +
+            `- Describe the brief, hilarious consequence or verdict in 1 to 2 punchy sentences.\n` +
+            `- Match the outcome to the roll (${tier}). A Nat 20 is legendary, a Nat 1 is a catastrophic backfire, a Mixed Success has an awkward catch.\n` +
+            `- Deadpan, sharp Discord banter tone. Zero generic AI filler. Zero emoji spam.`
+        );
+
+        try {
+            const response = await this.llmManager.chat([
+                { role: 'system', content: dmPrompt },
+                { role: 'user', content: `Adjudicate the outcome for: "${action}".` }
+            ]);
+
+            const header = `🎲 **D&D Check: "${action}"**\n` +
+                `Rolled **${count}d${sides}${modStr}**: ${rollDisplay} — **${tier}**\n\n`;
+
+            return await message.reply(header + response.content.trim());
+        } catch (err) {
+            logger.warn(`DM adjudication failed: ${err.message}`);
+            return await message.reply(`🎲 Rolled **${count}d${sides}${modStr}**: ${rollDisplay} — **${tier}** for *"${action}"*`);
+        }
+    }
+
+    async cmdChoose(message, args) {
+        const raw = args.join(' ').trim();
+        if (!raw) {
+            return await message.reply('Usage: `!choose <option 1>, <option 2>, <option 3>` or `!choose sleep or code`');
+        }
+
+        let options = [];
+        if (raw.includes(',')) {
+            options = raw.split(',').map(s => s.trim()).filter(Boolean);
+        } else if (/\s+or\s+/i.test(raw)) {
+            options = raw.split(/\s+or\s+/i).map(s => s.trim()).filter(Boolean);
+        } else {
+            options = raw.split(/\s+/).filter(Boolean);
+        }
+
+        if (options.length < 2) {
+            return await message.reply('Please give me at least 2 options to choose between. Example: `!choose valorant, sleep, code`');
+        }
+
+        const rollIdx = Math.floor(Math.random() * options.length);
+        const chosen = options[rollIdx];
+
+        return await message.reply(`🎲 **Fate has chosen**: **${chosen}** *(d${options.length} rolled ${rollIdx + 1})*`);
+    }
+
+    async cmdCoin(message) {
+        const isHeads = Math.random() < 0.5;
+        const flip = isHeads ? 'Heads' : 'Tails';
+        return await message.reply(`🪙 The coin landed on: **${flip}**.`);
     }
 
     async cmdClear(message) {
