@@ -2,11 +2,12 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, client }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
         this.commandHandler = commandHandler;
+        this.channelHistory = channelHistory;
         this.client = client;
         this.processedMessageIds = new Set();
         this.showTokens = false;
@@ -124,8 +125,29 @@ class MessageHandler {
         }
 
         try {
-            // Build multi-tier context with projects and temporal awareness
-            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery);
+            // Retrieve live channel / server conversation history if asked or in server channel
+            let liveTranscriptContext = null;
+            if (this.channelHistory && this.channelHistory.isHistoryInquiry(userQuery)) {
+                const targetChannel = this.channelHistory.resolveTargetChannel(userQuery, message.channel);
+                if (targetChannel) {
+                    const { transcript, messageCount, channelName, guildName } =
+                        await this.channelHistory.fetchRecentTranscript(targetChannel, 40);
+                    if (transcript && messageCount > 0) {
+                        liveTranscriptContext = `[LIVE DISCORD CHAT TRANSCRIPT (#${channelName} in ${guildName} - ${messageCount} recent messages)]:\n${transcript}\n\nUse this real chat history to answer the user accurately, concisely, and factually.`;
+                    }
+                }
+            } else if (this.channelHistory && message.guild && message.channel.isTextBased()) {
+                // Ambient conversational context from current channel (last 8 messages)
+                try {
+                    const { transcript } = await this.channelHistory.fetchRecentTranscript(message.channel, 8);
+                    if (transcript) {
+                        liveTranscriptContext = `[RECENT CHANNEL MESSAGES (#${message.channel.name})]:\n${transcript}`;
+                    }
+                } catch (e) {}
+            }
+
+            // Build multi-tier context with projects, temporal awareness, and live chat transcript
+            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext);
 
             // Execute LLM inference
             const response = await this.llmManager.chat(messages);

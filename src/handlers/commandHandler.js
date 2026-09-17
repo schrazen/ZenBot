@@ -1,11 +1,13 @@
 const { EmbedBuilder } = require('discord.js');
+const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager }) {
+    constructor({ config, llmManager, memoryManager, channelHistory }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
+        this.channelHistory = channelHistory;
     }
 
     /**
@@ -75,9 +77,15 @@ class CommandHandler {
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can toggle token indicators.');
                 return await this.cmdTokens(message, argText);
             case 'roast':
+            case 'roast':
             case 'cook':
             case 'petty':
                 return await this.cmdRoast(message, args);
+            case 'summarize':
+            case 'catchup':
+            case 'recap':
+            case 'tldr':
+                return await this.cmdSummarize(message, args);
             case 'clear':
                 return await this.cmdClear(message);
             default:
@@ -101,11 +109,18 @@ class CommandHandler {
                     )
                 },
                 {
+                    name: 'Chat History & Summaries',
+                    value: (
+                        '`!summarize [channel|server|count]` — Summarize chat from this or another channel (e.g. `!summarize banorant`, `!summarize 50`)\n' +
+                        '`!catchup` / `!recap` — Catch up on recent discussions\n' +
+                        '`!clear` — Reset short-term conversation context for this channel'
+                    )
+                },
+                {
                     name: 'Memory & Profile',
                     value: (
                         '`!facts [search]` — List or search remembered knowledge\n' +
-                        '`!profile` — Review Lance\'s compiled profile & goals\n' +
-                        '`!clear` — Reset short-term conversation context for this channel'
+                        '`!profile` — Review Lance\'s compiled profile & goals'
                     )
                 },
                 {
@@ -548,6 +563,70 @@ class CommandHandler {
         } catch (error) {
             logger.error(`Roast generation failed: ${error.message}`);
             return await message.reply(`Failed to cook ${targetName}: ${error.message}`);
+        }
+    }
+
+    async cmdSummarize(message, args) {
+        const query = args.join(' ').trim();
+        const limitMatch = query.match(/\b(\d{1,3})\b/);
+        const limit = limitMatch ? parseInt(limitMatch[1], 10) : 35;
+
+        // Strip numbers from query to isolate channel/guild names
+        const searchPhrase = query.replace(/\b\d{1,3}\b/g, '').trim();
+
+        // Resolve target channel (current channel or across connected servers)
+        const targetChannel = this.channelHistory
+            ? this.channelHistory.resolveTargetChannel(searchPhrase, message.channel)
+            : message.channel;
+
+        if (!targetChannel) {
+            return await message.reply('Could not identify which channel to summarize. Usage: `!summarize [channel or server name] [count]`. Example: `!summarize banorant` or `!summarize 40`.');
+        }
+
+        try {
+            await message.channel.sendTyping();
+        } catch (e) {}
+
+        const { transcript, messageCount, channelName, guildName, error } =
+            await this.channelHistory.fetchRecentTranscript(targetChannel, limit);
+
+        if (error) {
+            return await message.reply(`Could not read messages from #${channelName}: ${error}`);
+        }
+
+        if (!transcript || messageCount === 0) {
+            return await message.reply(`No recent messages found in #${channelName} (${guildName}).`);
+        }
+
+        const summaryPrompt = (
+            `You are ZenBot. Summarize the following recent Discord chat transcript from #${channelName} in ${guildName}.\n\n` +
+            `TRANSCRIPT (${messageCount} messages):\n` +
+            `${transcript}\n\n` +
+            `SUMMARY INSTRUCTIONS:\n` +
+            `- Be compact, sharp, and Discord-friendly (peer dev/gamer tone).\n` +
+            `- NEVER USE MARKDOWN TABLES. Always use clean bold headers and indented bullet points.\n` +
+            `- Structure:\n` +
+            `  • **Core Topics**: What was being talked about\n` +
+            `  • **Key Highlights & Inputs**: Notable points from specific members\n` +
+            `  • **Current Vibe / Next Steps**: Any plans, decisions, or ongoing banter\n` +
+            `- Zero emoji spam. Maximum 1 subtle reaction emoji or none.\n` +
+            `- Avoid generic opening fluff ("Sure, here is..."). Jump straight into the recap.`
+        );
+
+        try {
+            const response = await this.llmManager.chat([
+                { role: 'system', content: summaryPrompt },
+                { role: 'user', content: `Summarize the recent discussion in #${channelName}.` }
+            ]);
+
+            const header = `**Chat Recap: #${channelName} (${guildName}) [Last ${messageCount} messages]**\n\n`;
+            const chunks = splitMessage(header + response.content, 1950);
+            for (const chunk of chunks) {
+                await message.reply(chunk);
+            }
+        } catch (err) {
+            logger.error(`Failed to summarize channel #${channelName}: ${err.message}`);
+            return await message.reply(`Error generating summary for #${channelName}: ${err.message}`);
         }
     }
 

@@ -46,7 +46,7 @@ class MemoryManager {
     /**
      * Builds full context messages array for LLM completion.
      */
-    buildMessages(channelId, userQuery) {
+    buildMessages(channelId, userQuery, liveContext = null) {
         const messages = [];
 
         // 1. Base System Prompt
@@ -85,7 +85,15 @@ class MemoryManager {
 
         messages.push({ role: 'system', content: systemPrompt });
 
-        // 6. Inject Relevant Past Episodic Memories (Tier 3)
+        // 6. Inject Live Channel / Server Transcript Context if provided
+        if (liveContext) {
+            messages.push({
+                role: 'system',
+                content: liveContext
+            });
+        }
+
+        // 7. Inject Relevant Past Episodic Memories (Tier 3)
         const retrievedMemories = this.episodic.retrieve(userQuery, 3);
         if (retrievedMemories.length > 0) {
             const memorySnippets = retrievedMemories
@@ -97,13 +105,13 @@ class MemoryManager {
             });
         }
 
-        // 7. Inject Short-term rolling history
+        // 8. Inject Short-term rolling history
         const recent = this.shortTermHistory.get(channelId) || [];
         for (const turn of recent) {
             messages.push({ role: turn.role, content: turn.content });
         }
 
-        // 8. Current turn
+        // 9. Current turn
         messages.push({ role: 'user', content: userQuery });
 
         return messages;

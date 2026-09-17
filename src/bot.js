@@ -4,6 +4,7 @@ const LLMManager = require('./services/llm');
 const MemoryManager = require('./services/memory');
 const CommandHandler = require('./handlers/commandHandler');
 const MessageHandler = require('./handlers/messageHandler');
+const ChannelHistoryService = require('./services/channelHistory');
 const logger = require('./utils/logger');
 
 class ZenBot {
@@ -24,11 +25,13 @@ class ZenBot {
 
         this.llmManager = new LLMManager(this.config);
         this.memoryManager = new MemoryManager(this.config);
+        this.channelHistory = new ChannelHistoryService(this.client);
 
         this.commandHandler = new CommandHandler({
             config: this.config,
             llmManager: this.llmManager,
-            memoryManager: this.memoryManager
+            memoryManager: this.memoryManager,
+            channelHistory: this.channelHistory
         });
 
         this.messageHandler = new MessageHandler({
@@ -36,6 +39,7 @@ class ZenBot {
             llmManager: this.llmManager,
             memoryManager: this.memoryManager,
             commandHandler: this.commandHandler,
+            channelHistory: this.channelHistory,
             client: this.client
         });
 
