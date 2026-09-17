@@ -74,6 +74,10 @@ class CommandHandler {
             case 'tokens':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can toggle token indicators.');
                 return await this.cmdTokens(message, argText);
+            case 'roast':
+            case 'cook':
+            case 'petty':
+                return await this.cmdRoast(message, args);
             case 'clear':
                 return await this.cmdClear(message);
             default:
@@ -90,20 +94,17 @@ class CommandHandler {
                 {
                     name: 'Project Tracking',
                     value: (
-                        '`!projects` — Overview of your active projects & tech stacks\n' +
+                        '`!projects` — Overview of active projects & tech stacks\n' +
                         '`!project <name>` — Detailed architecture & tasks for a project\n' +
-                        '`!project task <name> <task>` — Add a task to a project\n' +
+                        '`!project task <name> <task>` — Add a task to a project (Owner only)\n' +
                         '`!standup` — Daily planning check-in based on goals & projects'
                     )
                 },
                 {
                     name: 'Memory & Profile',
                     value: (
-                        '`!remember <fact>` — Store a personal note, habit, or preference\n' +
                         '`!facts [search]` — List or search remembered knowledge\n' +
-                        '`!forget <text/id>` — Remove a fact from memory\n' +
-                        '`!profile` — Review your compiled profile & goals\n' +
-                        '`!addgoal <goal>` — Add a new career or personal goal\n' +
+                        '`!profile` — Review Lance\'s compiled profile & goals\n' +
                         '`!clear` — Reset short-term conversation context for this channel'
                     )
                 },
@@ -112,9 +113,17 @@ class CommandHandler {
                     value: (
                         '`!status` — Provider status, active model, and memory counts\n' +
                         '`!limits` — Real-time tokens, remaining requests, and rate limits\n' +
-                        '`!provider <groq|gemini>` — Switch active AI provider\n' +
-                        '`!model <name>` — Switch model for active provider\n' +
                         '`!ping` — Test bot latency'
+                    )
+                },
+                {
+                    name: 'Owner Controls (Lance Only)',
+                    value: (
+                        '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord (or reply with `!roast`)\n' +
+                        '`!provider <groq|gemini>` — Switch active AI provider\n' +
+                        '`!model <name>` — Switch active LLM model\n' +
+                        '`!remember <fact>` / `!forget <id>` — Store or delete permanent memories\n' +
+                        '`!addgoal <goal>` — Add a new career/dev goal'
                     )
                 },
                 {
@@ -450,6 +459,96 @@ class CommandHandler {
         }
         this.messageHandler.showTokens = !this.messageHandler.showTokens;
         return await message.reply(`In-chat token indicator is now **${this.messageHandler.showTokens ? 'ON' : 'OFF'}**.`);
+    }
+
+    async cmdRoast(message, args) {
+        if (!this.isOwner(message)) {
+            const speaker = message.member?.displayName || message.author.username;
+            return await message.reply(`Nice try, ${speaker}. Only Lance has the clearance to order hits. Sit back down.`);
+        }
+
+        let targetUser = null;
+        let targetContent = '';
+
+        // 1. Check if replying to a specific message
+        if (message.reference && message.reference.messageId) {
+            try {
+                const refMsg = await message.channel.messages.fetch(message.reference.messageId);
+                if (refMsg) {
+                    targetUser = refMsg.author;
+                    targetContent = refMsg.content;
+                }
+            } catch (e) {
+                logger.warn(`Could not fetch referenced message for roast: ${e.message}`);
+            }
+        }
+
+        // 2. Check mentions in command message
+        const botId = this.messageHandler?.client?.user?.id || message.client?.user?.id;
+        const mentioned = message.mentions.users.filter(u => u.id !== botId).first();
+        if (mentioned) {
+            targetUser = mentioned;
+        }
+
+        // 3. Prevent self-roasting or shooting the boss
+        if (targetUser && targetUser.id === botId) {
+            return await message.reply('I am not roasting myself, Lance. I carry this entire server.');
+        }
+        if (targetUser && targetUser.id === message.author.id && !args.length) {
+            return await message.reply('I work for you, Lance. Pick a real victim.');
+        }
+
+        let targetName = '';
+        let reason = '';
+
+        if (targetUser) {
+            const member = message.guild?.members.cache.get(targetUser.id);
+            targetName = member?.displayName || targetUser.username;
+            reason = args.filter(a => !a.startsWith('<@')).join(' ').trim();
+        } else if (args.length > 0) {
+            targetName = args[0];
+            reason = args.slice(1).join(' ').trim();
+        } else {
+            return await message.reply('Give me a victim: reply to their message with `!roast`, or use `!roast @user [optional topic]`.');
+        }
+
+        try {
+            await message.channel.sendTyping();
+        } catch (e) {}
+
+        const roastSystemPrompt = (
+            `You are ZenBot, Lance's fiercely loyal, hyper-intelligent, and aggressively petty AI companion. ` +
+            `Lance has specifically authorized you to ruthlessly roast, cook, and verbally dismantle a target in this Discord chat.\n\n` +
+            `ROAST RULES:\n` +
+            `- Tone: Deadpan, razor-sharp, viciously petty, sarcastic, and hilarious Discord developer/gamer banter.\n` +
+            `- Do NOT use generic cheesy dad jokes or bland insults. Make it feel personal, hyper-specific, and cutting.\n` +
+            `- Call them out mercilessly on their skill issues, logic flaws, excuses, or whatever context/quote Lance provided.\n` +
+            `- Length: 1 to 2 short, punchy paragraphs (maximum 4 sentences total). Every single word must hit like a freight train.\n` +
+            `- Zero generic AI filler ("Oh, you want a roast?", "Let's talk about...", "Here goes nothing"). Jump straight for the jugular.\n` +
+            `- Zero emoji spam. At most 1 subtle reaction emoji or none at all.\n` +
+            `- Address the target directly as "${targetName}".`
+        );
+
+        let promptContent = `Target: ${targetName}.\n`;
+        if (targetContent) {
+            promptContent += `What they just said in chat: "${targetContent}"\n`;
+        }
+        if (reason) {
+            promptContent += `Context / ammunition from Lance: "${reason}"\n`;
+        }
+        promptContent += `Cook them with maximum pettiness.`;
+
+        try {
+            const response = await this.llmManager.chat([
+                { role: 'system', content: roastSystemPrompt },
+                { role: 'user', content: promptContent }
+            ]);
+
+            return await message.reply(response.content);
+        } catch (error) {
+            logger.error(`Roast generation failed: ${error.message}`);
+            return await message.reply(`Failed to cook ${targetName}: ${error.message}`);
+        }
     }
 
     async cmdClear(message) {
