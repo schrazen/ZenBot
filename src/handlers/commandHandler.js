@@ -113,8 +113,13 @@ class CommandHandler {
             case 'clear':
                 return await this.cmdClear(message);
             case 'availability':
+            case 'avail':
+            case 'away':
+            case 'afk':
+            case 'sleep':
+            case 'back':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can manage availability status.');
-                return await this.cmdAvailability(message, argText);
+                return await this.cmdAvailability(message, argText, cmd);
             case 'study':
             case 'quiz':
             case 'review':
@@ -195,7 +200,8 @@ class CommandHandler {
                 {
                     name: 'Owner Controls (Lance Only)',
                     value: (
-                        '`!availability [status|on|off|away|sleep|auto] [duration]` — Owner availability & auto-reply detection\n' +
+                        '`!availability [status|on|off|away|sleep|auto] [reason/duration]` — Owner availability status\n' +
+                        '`!away [reason/duration]` / `!sleep` / `!back` — Quick availability shortcuts\n' +
                         '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord (or reply with `!roast`)\n' +
                         '`!bot [info|profile]` — Inspect bot profile, presence, and bio\n' +
                         '`!bot status <text>` or `!setstatus <text>` — Change status / activity\n' +
@@ -914,20 +920,40 @@ class CommandHandler {
     /**
      * Manages Lance's availability & inactivity detection status or manual override.
      */
-    async cmdAvailability(message, argText) {
+    async cmdAvailability(message, argText, originalCmd = 'availability') {
         if (!this.ownerAvailability) {
             return await message.reply('Owner availability service is not initialized.');
         }
 
         const raw = (argText || '').trim();
+
+        // Direct shortcuts: !away [reason/duration], !afk [reason/duration]
+        if (originalCmd === 'away' || originalCmd === 'afk') {
+            const result = this.ownerAvailability.setManualState('away', raw || null);
+            return await message.reply(`✅ ${result.message}`);
+        }
+
+        // Direct shortcut: !sleep [duration]
+        if (originalCmd === 'sleep') {
+            const result = this.ownerAvailability.setManualState('sleep', raw || null);
+            return await message.reply(`✅ ${result.message}`);
+        }
+
+        // Direct shortcut: !back
+        if (originalCmd === 'back') {
+            const result = this.ownerAvailability.setManualState('auto');
+            return await message.reply(`✅ ${result.message}`);
+        }
+
+        // !availability or !avail without args -> show status embed
         if (!raw || raw.toLowerCase() === 'status') {
             const embed = this.ownerAvailability.getStatusEmbed();
             return await message.reply({ embeds: [embed] });
         }
 
-        const [action, ...durationParts] = raw.split(/\s+/);
-        const duration = durationParts.join(' ').trim();
-        const result = this.ownerAvailability.setManualState(action, duration);
+        const [action, ...restParts] = raw.split(/\s+/);
+        const reasonOrDuration = restParts.join(' ').trim();
+        const result = this.ownerAvailability.setManualState(action, reasonOrDuration || null);
 
         if (result.error) {
             return await message.reply(`⚠️ ${result.error}`);

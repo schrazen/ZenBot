@@ -321,21 +321,29 @@ class OwnerAvailabilityService {
         }
 
         // Filter out purely casual / descriptive references (do NOT trigger)
-        const isDescriptive = /\b(reminds me of|said earlier|was right|according to|kagaya ni|sabi ni)\s+(lance|schrazen|zen)\b/i.test(content);
+        const isDescriptive = /\b(reminds me of|said earlier|was right|according to|kagaya ni|tulad ni|sabi ni|kwento ni|balita kay)\s+(lance|schrazen|zen)\b/i.test(content);
         if (isDescriptive) {
             return { isContact: false };
         }
 
-        // Check clear contact / where-is inquiry patterns
+        // Check clear contact / where-is inquiry patterns (English & Tagalog/Filipino)
         const contactPatterns = [
-            /\b(where('s| is|\s+is)|nasan|nasaan|asan)(\s+na)?(\s+si)?\s+(he|lance|schrazen|zen)\b/i,
-            /\bhas anyone seen (lance|schrazen|zen|him)\b/i,
-            /\b(tell|paki\s*sabi\s*kay|pakisabi\s*kay|paki\s*tawag\s*si|sabihin\s*kay)\s+(lance|schrazen|zen|him)\b/i,
-            /\b(is|are|tulog\s*ba\s*si|tulog\s*na\s*ba\s*si|gising\s*ba\s*si|online\s*ba\s*si|nandito\s*ba\s*si|naka\s*afk\s*ba\s*si|afk\s*ba\s*si|wala\s*ba\s*si)\s+(lance|schrazen|zen)(\s+(awake|online|asleep|here|afk|active|around|tulog|gising))?\b/i,
+            // Where is Lance / Asan / Nasan / San / Wer
+            /\b(where('s| is|\s+is)|nasan|nasaan|asan|san|wer)(\s+na)?(\s+si)?\s+(he|lance|schrazen|zen)\b/i,
+            // Has anyone seen Lance / Nakita niyo ba si Lance
+            /\b(has anyone seen|nakita n(iy)?o ba|nakita nyo si|nasan na|asan na)\s+(lance|schrazen|zen|him)\b/i,
+            // Tell / Call / Message / PM / DM Lance
+            /\b(tell|paki\s*sabi\s*kay|pakisabi\s*kay|paki\s*tawag\s*si|pakitawag\s*si|sabihin\s*kay|sabihan\s*si|tawagin\s*(mo)?\s*si|chat\s*(mo)?\s*si|pm\s*(mo)?\s*si|dm\s*(mo)?\s*si)\s+(lance|schrazen|zen|him)\b/i,
+            // Is Lance asleep / awake / online / buhay / afk / wala
+            /\b(is|are|tulog\s*(na)?\s*(ba|ata|yata)?\s*si|gising\s*(na|pa)?\s*(ba|ata|yata)?\s*si|buhay\s*(pa)?\s*(ba|kaya)?\s*si|online\s*(pa|ba)?\s*si|nandito\s*ba\s*si|nandyan\s*ba\s*si|nanjan\s*ba\s*si|naka\s*afk\s*ba\s*si|afk\s*ba\s*si|wala\s*(ba|ata|yata)?\s*si)\s+(lance|schrazen|zen)(\s+(awake|online|asleep|here|afk|active|around|tulog|gising))?\b/i,
+            // Tulog na ata si lance
             /\b(tulog\s*(na)?\s*(ata|yata|ba)?\s*si)\s+(lance|schrazen|zen)\b/i,
-            /\b(yo|hey|hi|hello|hoi|hoy|psst|ping)\s+(lance|schrazen|zen)\b/i,
-            /\b(calling|calling\s*for|looking\s*for|hanap\s*si|hinahanap\s*si)\s+(lance|schrazen|zen)\b/i,
-            /\b(lance|schrazen|zen)\s*\?/i
+            // Greetings / Pings: hoy, uy, psst, yo
+            /\b(yo|hey|hi|hello|hoi|hoy|psst|uy|oi)\s+(lance|schrazen|zen)\b/i,
+            // Calling / looking for / hinahanap
+            /\b(calling|calling\s*for|looking\s*for|hanap\s*si|hinahanap\s*(ko|namin)?\s*si)\s+(lance|schrazen|zen)\b/i,
+            // Direct address with question or location: "lance?", "lance asan ka", "lance gising ka pa"
+            /\b(lance|schrazen|zen)\s*(\?|\b(asan ka|san ka|wer u|where are you|gising ka|online ka|buhay ka|nandyan ka|nanjan ka)\b)/i
         ];
 
         for (const pat of contactPatterns) {
@@ -349,6 +357,28 @@ class OwnerAvailabilityService {
         }
 
         return { isContact: false };
+    }
+
+    /**
+     * Checks if a message is written in Tagalog/Taglish, or if it's a general/ambiguous ping.
+     * Defaults to true since Lance's server friends predominantly speak Filipino.
+     */
+    isTagalogMessage(text) {
+        if (!text) return true;
+        const lower = text.toLowerCase();
+
+        // Strong Filipino words and slang particles
+        const tagalogWords = /\b(ba|na|mo|ka|ko|ni|ng|mga|saan|nasaan|asan|san|wer|tulog|gising|buhay|wala|meron|paki|pakisabi|pakitawag|tara|oy|uy|hoy|ata|yata|daw|raw|dito|dyan|diyan|dun|doon|kanina|mamaya|babalik|kasi|kase|bakit|ano|paano|sino|natin|namin|nila|kayo|tayo|sila|si|ikaw|ako|siya|nya|niya|nito|niyan|nandito|nandyan|nanjan|kelan|kailan|talaga|kamusta|musta|geh|sige|eto|heto|kuya|pre|bro|tol|lods|lodz|paps|idol|idolo|haha|hahaha|heh|eh)\b/i;
+        if (tagalogWords.test(lower)) return true;
+
+        // Pure English detection: if the query uses explicit English markers without any Tagalog
+        const englishMarkers = /\b(where|what|when|why|who|how|is|are|does|did|has|have|can|could|will|would|anyone|someone|anybody|somebody|asleep|awake|online|busy|message|tell|call|check|please|thanks)\b/i;
+        if (englishMarkers.test(lower)) {
+            return false;
+        }
+
+        // Default to Tagalog/Taglish for short pings or casual tags like "@Lance" or "Lance?"
+        return true;
     }
 
     /**
@@ -379,26 +409,72 @@ class OwnerAvailabilityService {
 
     /**
      * Generates a natural, non-impersonating response based on availability state.
+     * Automatically adapts between Filipino/Taglish and English based on the caller's message.
      */
-    generateAvailabilityResponse(state) {
+    generateAvailabilityResponse(state, callerMessage = '', customReason = null) {
+        const isTagalog = this.isTagalogMessage(callerMessage);
+        const hasReason = customReason && customReason !== 'Manual override' && !customReason.startsWith('Manual override');
+
         if (state === 'LIKELY_ASLEEP') {
-            const responses = [
-                "He's probably asleep rn. You can leave a message though.",
-                "Pretty sure he's asleep right now. Leave it here, he'll see it later.",
-                "Parang tulog na siya rn. I'll leave him to discover this later.",
-                "He's likely asleep right now. Drop whatever you need and he'll check it when he wakes up."
-            ];
-            return responses[Math.floor(Math.random() * responses.length)];
+            if (isTagalog) {
+                if (hasReason) {
+                    const tagalogWithReason = [
+                        `Tulog na ata si Lance ngayon (${customReason}). Iwan ka na lang muna ng message rito, makikita naman niya paggising.`,
+                        `Parang bagsak / tulog na si Lance rn (${customReason}). Iwan mo na lang message mo rito, babasahin niya 'yan pag gising.`,
+                        `Nakatulog na ata siya (${customReason}). Drop mo na lang sasabihin mo rito, pina-alert ko na rin sa kanya.`
+                    ];
+                    return tagalogWithReason[Math.floor(Math.random() * tagalogWithReason.length)];
+                }
+                const tagalogAsleep = [
+                    "Parang tulog na ata si Lance ngayon. Iwan ka na lang muna ng message rito, makikita naman niya paggising.",
+                    "Baka bagsak / tulog na si Lance rn. Iwan mo na lang dito sasabihin mo, babasahin niya 'yan pag gising.",
+                    "Tulog na ata 'yun haha. Drop mo na lang message mo rito, pina-alert ko na rin sa kanya sa DM.",
+                    "Mukhang tulog na si Lance ngayon. Iwan ka na lang ng chat dito para mabalikan ka niya later.",
+                    "Parang natutulog na siya rn. Iwanan mo na lang dito sasabihin mo, makikita naman niya pag check niya ng phone."
+                ];
+                return tagalogAsleep[Math.floor(Math.random() * tagalogAsleep.length)];
+            } else {
+                if (hasReason) {
+                    return `Looks like Lance is asleep right now (${customReason}). Feel free to leave a message and he'll see it when he wakes up.`;
+                }
+                const englishAsleep = [
+                    "Looks like Lance is probably asleep right now. Feel free to leave a message, he'll see it when he wakes up.",
+                    "Pretty sure he's asleep right now. Drop whatever you need here and he'll check it later.",
+                    "He's likely asleep right now. Leave it here, I already sent an alert to his DM."
+                ];
+                return englishAsleep[Math.floor(Math.random() * englishAsleep.length)];
+            }
         }
 
         if (state === 'INACTIVE') {
-            const responses = [
-                "He's probably away / AFK at the moment.",
-                "Looks like he's inactive right now. Feel free to leave a message.",
-                "I don't think he's around right now. Leave it here, he'll see it later.",
-                "Parang wala pa siya ngayon or AFK. You can leave a message though."
-            ];
-            return responses[Math.floor(Math.random() * responses.length)];
+            if (isTagalog) {
+                if (hasReason) {
+                    const tagalogWithReason = [
+                        `Naka-away si Lance ngayon: "${customReason}". Iwan ka na lang muna ng message dito, makikita niya 'yan pagbalik.`,
+                        `Wala muna si Lance sa paligid rn (${customReason}). Drop mo na lang dito sasabihin mo, babalikan ka nun later.`,
+                        `Parang busy o away si Lance ngayon (${customReason}). Iwanan mo na lang ng chat rito para mabasa niya.`
+                    ];
+                    return tagalogWithReason[Math.floor(Math.random() * tagalogWithReason.length)];
+                }
+                const tagalogInactive = [
+                    "Parang AFK / wala pa si Lance ngayon. Iwan ka na lang muna ng message, babalikan ka nun pagbalik.",
+                    "Wala ata si Lance sa PC/phone rn. Drop mo na lang dito sasabihin mo, makikita naman niya 'yan.",
+                    "Parang di pa active si Lance ngayon. Iwan mo na lang message mo rito para mabasa niya later.",
+                    "Naka-away ata si Lance ngayon. Iwan ka na lang ng message dito, nag-ping na rin ako sa DM niya.",
+                    "Wala pa ata si Lance sa paligid. Iwanan mo na lang ng chat dito, sasagutin ka rin nun maya-maya."
+                ];
+                return tagalogInactive[Math.floor(Math.random() * tagalogInactive.length)];
+            } else {
+                if (hasReason) {
+                    return `Lance is currently away (${customReason}). Feel free to leave a message and he'll get back to you.`;
+                }
+                const englishInactive = [
+                    "Looks like Lance is away / AFK right now. Feel free to leave a message and he'll get back to you.",
+                    "He's probably away from his desk at the moment. Leave your message here, he'll check it later.",
+                    "I don't think Lance is around right now. Leave your message here, he'll check it later."
+                ];
+                return englishInactive[Math.floor(Math.random() * englishInactive.length)];
+            }
         }
 
         return null;
@@ -475,8 +551,9 @@ class OwnerAvailabilityService {
             return false;
         }
 
-        // 4. Generate natural response
-        const replyText = this.generateAvailabilityResponse(stateInfo.state);
+        // 4. Generate natural response (Tagalog/Taglish & reason aware)
+        const customReason = this.data.manual_state ? this.data.manual_reason : null;
+        const replyText = this.generateAvailabilityResponse(stateInfo.state, message.content, customReason);
         if (!replyText) {
             return false;
         }
@@ -508,18 +585,21 @@ class OwnerAvailabilityService {
     }
 
     /**
-     * Sets manual availability state with optional duration.
-     * e.g. setManualState('INACTIVE', '2h')
+     * Sets manual availability state with optional reason or duration.
+     * e.g. setManualState('away', 'kumakain')
+     * e.g. setManualState('away', 'in class for 2h')
+     * e.g. setManualState('sleep')
+     * e.g. setManualState('auto')
      */
-    setManualState(stateInput, durationStr = null) {
+    setManualState(stateInput, reasonOrDuration = null) {
         const s = (stateInput || '').toLowerCase().trim();
 
-        if (s === 'auto' || s === 'reset' || s === 'clear') {
+        if (s === 'auto' || s === 'reset' || s === 'clear' || s === 'back') {
             this.data.manual_state = null;
             this.data.manual_until = null;
             this.data.manual_reason = null;
             this.saveState();
-            return { state: 'AUTO', message: 'Availability reset to automatic detection.' };
+            return { state: 'AUTO', message: 'Availability reset to automatic detection (Auto-Away & Sleep Scanner active).' };
         }
 
         let targetState = null;
@@ -535,11 +615,14 @@ class OwnerAvailabilityService {
 
         let until = null;
         let durationDesc = '';
-        if (durationStr) {
-            const match = durationStr.match(/^(\d+)\s*(m|min|h|hr|d|day)?s?$/i);
-            if (match) {
-                const amount = parseInt(match[1], 10);
-                const unit = (match[2] || 'h').toLowerCase();
+        let cleanReason = '';
+
+        if (reasonOrDuration) {
+            const rawText = String(reasonOrDuration).trim();
+            const durationMatch = rawText.match(/\b(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/i);
+            if (durationMatch) {
+                const amount = parseInt(durationMatch[1], 10);
+                const unit = durationMatch[2].toLowerCase();
                 let multiplier = 60 * 60 * 1000; // default hours
                 if (unit.startsWith('m')) multiplier = 60 * 1000;
                 else if (unit.startsWith('d')) multiplier = 24 * 60 * 60 * 1000;
@@ -548,18 +631,25 @@ class OwnerAvailabilityService {
                 until = Date.now() + durationMs;
                 durationDesc = ` for ${amount} ${unit.startsWith('m') ? 'minutes' : (unit.startsWith('d') ? 'days' : 'hours')}`;
             }
+
+            cleanReason = rawText
+                .replace(/\b(for\s+)?\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b/gi, '')
+                .replace(/^[-–—()\[\]\s]+|[-–—()\[\]\s]+$/g, '')
+                .trim();
         }
 
         this.data.manual_state = targetState;
         this.data.manual_until = until;
-        this.data.manual_reason = durationDesc ? `Manual override${durationDesc}` : 'Manual override';
+        this.data.manual_reason = cleanReason || (durationDesc ? `Manual override${durationDesc}` : 'Manual override');
         this.data.manual_set_at = Date.now();
         this.saveState();
 
+        const reasonText = cleanReason ? ` (${cleanReason})` : '';
         return {
             state: targetState,
             until,
-            message: `Availability set to **${targetState}**${durationDesc}.`
+            reason: cleanReason,
+            message: `Availability set to **${targetState}**${reasonText}${durationDesc}.`
         };
     }
 
