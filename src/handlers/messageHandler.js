@@ -37,12 +37,9 @@ class MessageHandler {
         // Dedup recent message events
         if (this.processedMessageIds.has(message.id)) return false;
 
-        // 1. Active study review session in this channel
+        // 1. Active study review session in this channel (anyone in channel can participate)
         if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
-            const session = this.studyService.getSession(message.channel.id);
-            if (session && (session.userId === message.author.id || this.isOwner(message))) {
-                return true;
-            }
+            return true;
         }
 
         // 2. Direct Messages (DMs) - STRICTLY OWNER ONLY
@@ -108,12 +105,17 @@ class MessageHandler {
             });
         }
 
-        // 2. If message should NOT be handled as a direct ZenBot interaction,
-        // run the smart owner availability / inactivity scanner for server messages!
-        if (!this.shouldHandle(message)) {
-            if (this.ownerAvailability && message.guild && !isOwner) {
-                await this.ownerAvailability.checkAndRespond(message);
+        // 2. Check if this is someone looking for or pinging Lance while he is away/asleep
+        // (Scans across all server channels, even if they didn't prompt ZenBot)
+        if (this.ownerAvailability && message.guild && !isOwner) {
+            const handledByAvailability = await this.ownerAvailability.checkAndRespond(message);
+            if (handledByAvailability) {
+                return;
             }
+        }
+
+        // 3. If message should NOT be handled as a direct ZenBot interaction, stop here
+        if (!this.shouldHandle(message)) {
             return;
         }
 

@@ -12,10 +12,10 @@ class OwnerAvailabilityService {
 
         // Cooldown configuration
         this.cooldowns = {
-            global: 30 * 60 * 1000,      // 30 minutes global
-            channel: 30 * 60 * 1000,     // 30 minutes per channel
-            user: 15 * 60 * 1000,        // 15 minutes per user
-            dmAlert: 10 * 60 * 1000      // 10 minutes per channel alert to owner
+            global: 2 * 60 * 1000,       // 2 minutes global
+            channel: 8 * 60 * 1000,      // 8 minutes per channel
+            user: 5 * 60 * 1000,         // 5 minutes per user
+            dmAlert: 5 * 60 * 1000       // 5 minutes per channel alert to owner
         };
 
         // In-memory cooldown tracking
@@ -328,11 +328,13 @@ class OwnerAvailabilityService {
 
         // Check clear contact / where-is inquiry patterns
         const contactPatterns = [
-            /\b(where('s| is|\s+is)|nasan|nasaan)(\s+na)?(\s+si)?\s+(he|lance|schrazen|zen)\b/i,
+            /\b(where('s| is|\s+is)|nasan|nasaan|asan)(\s+na)?(\s+si)?\s+(he|lance|schrazen|zen)\b/i,
             /\bhas anyone seen (lance|schrazen|zen|him)\b/i,
-            /\btell (lance|schrazen|zen|him) to\b/i,
-            /\b(is|are|tulog ba si|gising ba si|online ba si|nandito ba si)\s+(lance|schrazen|zen)(\s+(awake|online|asleep|here|afk|active|around|tulog|gising))?\b/i,
+            /\b(tell|paki\s*sabi\s*kay|pakisabi\s*kay|paki\s*tawag\s*si|sabihin\s*kay)\s+(lance|schrazen|zen|him)\b/i,
+            /\b(is|are|tulog\s*ba\s*si|tulog\s*na\s*ba\s*si|gising\s*ba\s*si|online\s*ba\s*si|nandito\s*ba\s*si|naka\s*afk\s*ba\s*si|afk\s*ba\s*si|wala\s*ba\s*si)\s+(lance|schrazen|zen)(\s+(awake|online|asleep|here|afk|active|around|tulog|gising))?\b/i,
+            /\b(tulog\s*(na)?\s*(ata|yata|ba)?\s*si)\s+(lance|schrazen|zen)\b/i,
             /\b(yo|hey|hi|hello|hoi|hoy|psst|ping)\s+(lance|schrazen|zen)\b/i,
+            /\b(calling|calling\s*for|looking\s*for|hanap\s*si|hinahanap\s*si)\s+(lance|schrazen|zen)\b/i,
             /\b(lance|schrazen|zen)\s*\?/i
         ];
 
