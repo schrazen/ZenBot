@@ -84,8 +84,8 @@ class ChannelHistoryService {
         }
 
         const safeLimit = Math.min(Math.max(limit, 5), 100);
-        const channelName = channel.name || 'channel';
-        const guildName = channel.guild?.name || 'Server';
+        const channelName = channel.name || (typeof channel.isDMBased === 'function' && channel.isDMBased() ? 'Direct Message' : 'channel');
+        const guildName = channel.guild?.name || 'Direct Messages';
 
         try {
             const fetched = await channel.messages.fetch({ limit: safeLimit });

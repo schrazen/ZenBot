@@ -132,31 +132,84 @@ class MessageHandler {
         // 3. Active Acads / Study Review Session in this channel
         if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
             const session = this.studyService.getSession(message.channel.id);
-            if (session && (session.userId === message.author.id || isOwner)) {
+            if (session) {
                 const lower = userQuery.trim().toLowerCase();
+
+                // Stop / Quit / Cancel
                 if (['stop', 'quit', 'exit', 'cancel', 'end'].includes(lower)) {
-                    const score = this.studyService.endSession(message.channel.id);
-                    if (score && score.total > 0) {
-                        return await message.reply(`🛑 **Study Session Ended.**\nScore so far: **${score.correct}/${score.total}** (${score.percentage}%)\nGreat job! Reply \`quiz me\` anytime to try again.`);
+                    const canStop = session.userId === message.author.id || isOwner || Boolean(message.guild);
+                    if (canStop) {
+                        const score = this.studyService.endSession(message.channel.id);
+                        if (score && score.total > 0) {
+                            let endMsg = `🛑 **Study Session Ended.**\nScore so far: **${score.correct}/${score.total}** (${score.percentage}%)\n`;
+                            const pKeys = Object.keys(score.participants || {});
+                            if (pKeys.length > 1) {
+                                endMsg += `\n**Contributors:**\n` + pKeys
+                                    .map(k => `• ${score.participants[k].name}: ${score.participants[k].correct} correct`)
+                                    .join('\n') + `\n`;
+                            }
+                            endMsg += `Great job! Reply \`quiz me\` anytime to try again.`;
+                            return await message.reply(endMsg);
+                        }
+                        return await message.reply('🛑 **Study Session Ended.**');
                     }
-                    return await message.reply('🛑 **Study Session Ended.**');
+                }
+
+                // Skip / Pass / IDK / Reveal
+                if (['skip', 'pass', 'idk', 'dunno', 'reveal'].includes(lower)) {
+                    try {
+                        await message.channel.sendTyping();
+                    } catch (e) {}
+
+                    const skipResult = this.studyService.skipCard(message.channel.id, speakerName);
+                    if (skipResult.finished) {
+                        let finalReply = `${skipResult.feedback}\n\n🎉 **Deck Complete!**\nFinal Score: **${skipResult.score.correct}/${skipResult.score.total}** (${skipResult.score.percentage}%)\n`;
+                        const pKeys = Object.keys(skipResult.participants || {});
+                        if (pKeys.length > 1) {
+                            finalReply += `\n**Contributors:**\n` + pKeys
+                                .map(k => `• ${skipResult.participants[k].name}: ${skipResult.participants[k].correct} correct`)
+                                .join('\n') + `\n`;
+                        }
+                        finalReply += `Type \`quiz me\` to review again!`;
+                        return await message.reply(finalReply);
+                    }
+                    return await message.reply(`${skipResult.feedback}\n\n**${skipResult.nextDescription}**`);
                 }
 
                 try {
                     await message.channel.sendTyping();
                 } catch (e) {}
 
-                const result = await this.studyService.evaluateAnswer(message.channel.id, userQuery);
-                if (result.finished) {
-                    const finalReply = `${result.feedback}\n\n🎉 **Deck Complete!**\nFinal Score: **${result.score.correct}/${result.score.total}** (${result.score.percentage}%)\nType \`quiz me\` or \`!quiz\` whenever you want to review again!`;
-                    return await message.reply(finalReply);
-                }
+                // Evaluate answer - accepts answers from ANY user in the channel
+                const result = await this.studyService.evaluateAnswer(message.channel.id, userQuery, speakerName, message.author.id);
+                if (result && result.ignored) {
+                    // Casual chatter between members: do NOT burn the card!
+                    // If bot wasn't mentioned, let the conversation flow silently
+                    if (!message.mentions.has(this.client.user.id) && !userQuery.toLowerCase().includes('zenbot')) {
+                        return;
+                    }
+                    // If ZenBot was mentioned, fall through to AI with active study context
+                } else if (result) {
+                    if (result.finished) {
+                        let finalReply = `${result.isCorrect ? `**Correct, ${speakerName}! 🎉**` : `Incorrect, ${speakerName}. The answer is: **${result.targetAnswer}**`}\n\n🎉 **Deck Complete!**\nFinal Score: **${result.score.correct}/${result.score.total}** (${result.score.percentage}%)\n`;
+                        const pKeys = Object.keys(result.participants || {});
+                        if (pKeys.length > 1) {
+                            finalReply += `\n**Contributors:**\n` + pKeys
+                                .map(k => `• ${result.participants[k].name}: ${result.participants[k].correct} correct`)
+                                .join('\n') + `\n`;
+                        }
+                        finalReply += `Type \`quiz me\` or \`!quiz\` whenever you want to review again!`;
+                        return await message.reply(finalReply);
+                    }
 
-                // MODE 3: GRADING:
-                // 1. If correct: Reply "Correct!" and immediately output the next random [Description].
-                // 2. If incorrect: Reply "Incorrect. The answer is: [Word Answer]" and immediately output the next random [Description].
-                const replyText = `${result.feedback}\n\n**${result.nextDescription}**`;
-                return await message.reply(replyText);
+                    if (result.isCorrect) {
+                        const replyText = `**Correct, ${speakerName}! 🎉**\n\n**${result.nextDescription}**`;
+                        return await message.reply(replyText);
+                    } else {
+                        const replyText = `Incorrect, ${speakerName}. The answer is: **${result.targetAnswer}**\n\n**${result.nextDescription}**`;
+                        return await message.reply(replyText);
+                    }
+                }
             }
         }
 
@@ -210,7 +263,6 @@ class MessageHandler {
                 const activeDeck = this.studyService.getActiveDeck(message.channel.id);
                 const res = await this.studyService.ingestNotes(combinedContent, activeDeck, message.channel.id);
                 if (res.success && res.addedCount > 0) {
-                    // MODE 1: Reply ONLY with brief confirmation of count and ask if ready. Do not list terms.
                     return await message.reply(`Saved **${res.addedCount}** terms to deck **${res.deckName}**! Ready to begin? (Reply **"Quiz me"** when you're ready)`);
                 } else if (res.success) {
                     return await message.reply(`No distinct terms and definitions could be extracted from those notes. Make sure to provide concepts with descriptions or definitions!`);
@@ -220,15 +272,7 @@ class MessageHandler {
             }
         }
 
-        // Friendly response if mentioned without any query text
-        if (!userQuery && !attachmentText) {
-            if (message.mentions.has(this.client.user.id)) {
-                return await message.reply(`Hey ${speakerName}! What's on your mind? Mention me with a question or use \`!help\` to see what I can do.`);
-            }
-            return;
-        }
-
-        // 3. Inspect referenced reply message (if user is replying to someone else)
+        // 7. Inspect referenced reply message FIRST (if user is replying to someone or bot)
         let referencedContext = null;
         if (message.reference && message.reference.messageId) {
             try {
@@ -242,13 +286,38 @@ class MessageHandler {
             }
         }
 
+        // 8. If no text was provided (e.g. user just pinged @ZenBot):
+        let effectiveQuery = userQuery;
+        if (!effectiveQuery && !attachmentText) {
+            if (referencedContext) {
+                // User clicked reply and tagged bot without extra text
+                effectiveQuery = `[React to and address this referenced message]`;
+            } else if (message.mentions.has(this.client.user.id)) {
+                // Check if there was recent conversation in the channel
+                if (this.channelHistory && message.channel.isTextBased()) {
+                    try {
+                        const { transcript } = await this.channelHistory.fetchRecentTranscript(message.channel, 5);
+                        if (transcript && transcript.split('\n').length > 1) {
+                            effectiveQuery = `[React naturally to what was just discussed above in the channel]`;
+                        }
+                    } catch (e) {}
+                }
+
+                if (!effectiveQuery) {
+                    return await message.reply(`Yo ${speakerName}! What's up?`);
+                }
+            } else {
+                return;
+            }
+        }
+
         // Only allow owner to inject persistent inline memories
-        const rememberedInline = isOwner ? this.checkInlineMemory(userQuery) : null;
+        const rememberedInline = isOwner ? this.checkInlineMemory(effectiveQuery) : null;
 
         // Combine referenced message context and user query
-        let fullUserText = userQuery;
+        let fullUserText = effectiveQuery;
         if (referencedContext) {
-            fullUserText = `${referencedContext}\n\n${userQuery}`;
+            fullUserText = `${referencedContext}\n\n${effectiveQuery}`;
         }
 
         // Add speaker prefix when friends or server members talk so the LLM has context
@@ -256,7 +325,7 @@ class MessageHandler {
             ? `[From ${speakerName}]: ${fullUserText}`
             : fullUserText;
 
-        logger.info(`Message [${message.guild ? message.guild.name : 'DM'}] from ${message.author.tag} (${speakerName}): "${userQuery.slice(0, 80)}"`);
+        logger.info(`Message [${message.guild ? message.guild.name : 'DM'}] from ${message.author.tag} (${speakerName}): "${effectiveQuery.slice(0, 80)}"`);
 
         // Send typing indicator
         try {
@@ -266,10 +335,10 @@ class MessageHandler {
         }
 
         try {
-            // Retrieve live channel / server conversation history if asked or in server channel
+            // Retrieve live channel / server conversation history if asked or in server channel/DM
             let liveTranscriptContext = null;
-            if (this.channelHistory && this.channelHistory.isHistoryInquiry(userQuery)) {
-                const targetChannel = this.channelHistory.resolveTargetChannel(userQuery, message.channel);
+            if (this.channelHistory && this.channelHistory.isHistoryInquiry(effectiveQuery)) {
+                const targetChannel = this.channelHistory.resolveTargetChannel(effectiveQuery, message.channel);
                 if (targetChannel) {
                     const { transcript, messageCount, channelName, guildName } =
                         await this.channelHistory.fetchRecentTranscript(targetChannel, 40);
@@ -277,19 +346,25 @@ class MessageHandler {
                         liveTranscriptContext = `[LIVE DISCORD CHAT TRANSCRIPT (#${channelName} in ${guildName} - ${messageCount} recent messages)]:\n${transcript}\n\nUse this real chat history to answer the user accurately, concisely, and factually.`;
                     }
                 }
-            } else if (this.channelHistory && message.guild && message.channel.isTextBased()) {
-                // Ambient conversational context from current channel (last 8 messages)
+            } else if (this.channelHistory && message.channel?.isTextBased?.()) {
+                // Ambient conversational context from current channel (last 15 messages) - works for BOTH guild and DMs!
                 try {
-                    const { transcript } = await this.channelHistory.fetchRecentTranscript(message.channel, 8);
+                    const { transcript } = await this.channelHistory.fetchRecentTranscript(message.channel, 15);
                     if (transcript) {
-                        liveTranscriptContext = `[RECENT CHANNEL MESSAGES (#${message.channel.name})]:\n${transcript}`;
+                        const loc = message.guild ? `#${message.channel.name}` : 'Direct Messages';
+                        liveTranscriptContext = `[RECENT CHANNEL MESSAGES (${loc})]:\n${transcript}`;
                     }
                 } catch (e) {}
             }
 
-            // Build multi-tier context with projects, temporal awareness, and live chat transcript
+            // Build multi-tier context with projects, temporal awareness, live chat transcript, and active study session
             const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
-            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext, { isDM, isOwner });
+            const activeSession = this.studyService?.getSession(message.channel.id) || null;
+            const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext, {
+                isDM,
+                isOwner,
+                activeStudySession: activeSession
+            });
 
             // Execute LLM inference
             const response = await this.llmManager.chat(messages);

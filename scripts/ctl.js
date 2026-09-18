@@ -194,7 +194,7 @@ function printStatus(verbose = false) {
         : `${c.red}${c.bold}○ OFFLINE${c.reset}`;
 
     console.log(`\n${c.cyan}${c.bold}======================================================================${c.reset}`);
-    console.log(`                   ${c.yellow}⚡ ZENBOT CONTROL CENTER ⚡${c.reset}`);
+    console.log(`                   ${c.yellow}         ZENBOT  ${c.reset}`);
     console.log(`${c.cyan}${c.bold}======================================================================${c.reset}`);
     console.log(`  Status:     ${statusTag}`);
     console.log(`  Presence:   ${c.yellow}${prof.activityType || 'Watching'}${c.reset} "${prof.activity || 'None'}" [${c.green}${c.bold}${(prof.presence || 'online').toUpperCase()}${c.reset}]`);
@@ -271,13 +271,11 @@ function startBackground() {
         fs.mkdirSync(DATA_DIR, { recursive: true });
     }
 
-    const out = fs.openSync(LOG_FILE, 'a');
-    const err = fs.openSync(LOG_FILE, 'a');
-
-    const child = spawn('node', ['index.js'], {
+    const child = spawn('cmd.exe', ['/c', `node index.js >> "${LOG_FILE}" 2>&1`], {
         cwd: ROOT_DIR,
         detached: true,
-        stdio: ['ignore', out, err]
+        stdio: 'ignore',
+        windowsHide: true
     });
 
     child.unref();
@@ -607,7 +605,7 @@ switch (arg) {
         break;
 
     case 'restart':
-        restartBot(process.argv.includes('--bg') || process.argv.includes('-bg'));
+        restartBot(process.argv.includes('bg') || process.argv.includes('--bg') || process.argv.includes('-bg'));
         break;
 
     case 'status':

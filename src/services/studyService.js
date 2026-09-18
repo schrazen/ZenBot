@@ -483,7 +483,8 @@ class StudyService {
             incorrect: session.score.incorrect,
             total,
             percentage: total > 0 ? Math.round((session.score.correct / total) * 100) : 0,
-            deckName: session.deckName
+            deckName: session.deckName,
+            participants: session.participants || {}
         };
     }
 
@@ -523,6 +524,7 @@ class StudyService {
                 correct: 0,
                 incorrect: 0
             },
+            participants: {},
             currentCard: firstCard,
             startedAt: Date.now()
         };
@@ -571,44 +573,150 @@ class StudyService {
     }
 
     /**
-     * MODE 3: GRADING
-     * Evaluates user answer, updates statistics, and serves the next random Description.
+     * Skips the current card, reveals the answer, and advances to the next card.
      */
-    async evaluateAnswer(channelId, userAnswer) {
+    skipCard(channelId, speakerName = null) {
+        const session = this.activeSessions.get(channelId);
+        if (!session) return null;
+
+        const currentCard = session.currentCard;
+        const targetAnswer = currentCard.answer;
+        const deckKey = session.deckName;
+
+        // Update card stats in deck
+        const cardInDeck = this.decks[deckKey]?.find(c => c.id === currentCard.id);
+        if (cardInDeck) {
+            cardInDeck.stats.asked = (cardInDeck.stats.asked || 0) + 1;
+            cardInDeck.stats.incorrect = (cardInDeck.stats.incorrect || 0) + 1;
+            this.saveDecks();
+        }
+
+        session.score.incorrect++;
+        session.currentIndex++;
+
+        const feedback = `⏩ **Card Skipped.** The answer is: **${targetAnswer}**`;
+
+        if (session.currentIndex >= session.totalCards) {
+            this.activeSessions.delete(channelId);
+            const total = session.totalCards;
+            const correct = session.score.correct;
+            const pct = Math.round((correct / total) * 100);
+
+            return {
+                skipped: true,
+                feedback,
+                targetAnswer,
+                finished: true,
+                isFinished: true,
+                score: {
+                    correct,
+                    incorrect: session.score.incorrect,
+                    total,
+                    percentage: pct
+                },
+                deckName: session.deckName,
+                participants: session.participants || {}
+            };
+        }
+
+        const nextCardIndex = session.shuffledIndices[session.currentIndex];
+        const nextCard = this.decks[deckKey][nextCardIndex];
+        session.currentCard = nextCard;
+
+        return {
+            skipped: true,
+            feedback,
+            targetAnswer,
+            finished: false,
+            isFinished: false,
+            nextDescription: nextCard.description,
+            cardNumber: session.currentIndex + 1,
+            totalCards: session.totalCards,
+            deckName: session.deckName
+        };
+    }
+
+    /**
+     * MODE 3: GRADING & CHAT DISCRIMINATION
+     * Evaluates user answer, distinguishes casual banter from actual attempts,
+     * updates statistics, and serves the next random Description.
+     */
+    async evaluateAnswer(channelId, userAnswer, speakerName = 'Student', speakerId = null) {
         const session = this.activeSessions.get(channelId);
         if (!session) return null;
 
         const currentCard = session.currentCard;
         const targetAnswer = currentCard.answer;
         const aliases = currentCard.aliases || [];
+        const cleanUser = userAnswer.trim();
 
-        // 1. Evaluate locally
-        let isCorrect = this._evaluateLocally(userAnswer, targetAnswer, aliases);
+        // 1. Fast local evaluation
+        let isCorrect = this._evaluateLocally(cleanUser, targetAnswer, aliases);
+        let isAttempt = true;
 
-        // 2. If local check fails, use quick LLM semantic check for technical equivalence
-        if (!isCorrect && userAnswer.trim().length > 1) {
+        // 2. If local check fails, determine if this is an attempted answer or casual conversation
+        if (!isCorrect) {
+            const casualRegex = /^(?:paalam|teka|wait(?!\s+state)|namatay|o\s*shit|tangina|gago|bakit|ano\s+ba|haha|lmao|lol|ay\s+mali|niga|sir\b|di\s+ako)/i;
+            const looksConversational = casualRegex.test(cleanUser) || cleanUser.includes('?') || cleanUser.length > 75;
+
             try {
                 const evalPrompt = [
                     {
                         role: 'system',
                         content: (
-                            `You are an academic grading assistant. Determine if the student's answer correctly matches the target answer for a study card.\n` +
-                            `Accept minor typos, singular/plural differences, or standard synonymous phrasing.\n` +
-                            `Target Answer: "${targetAnswer}"\n` +
-                            `Target Aliases: ${JSON.stringify(aliases)}\n` +
-                            `Student Answer: "${userAnswer.trim()}"\n\n` +
-                            `Respond with ONLY "CORRECT" or "INCORRECT".`
+                            `You are an academic study quiz referee. A flashcard question is currently active in Discord chat.\n\n` +
+                            `FLASHCARD DESCRIPTION: "${currentCard.description}"\n` +
+                            `TARGET ANSWER: "${targetAnswer}"\n` +
+                            `TARGET ALIASES: ${JSON.stringify(aliases)}\n\n` +
+                            `A Discord user sent this message in the channel:\n` +
+                            `"${cleanUser}"\n\n` +
+                            `TASK:\n` +
+                            `1. "isAttempt": Is the user attempting to answer the flashcard question? (True if they guessed a term, concept, acronym, or option. False if they are having off-topic casual chat, reacting to friends, talking about something else, or commenting on the quiz itself like "wait mali", "namatay memory", "paalam na ako").\n` +
+                            `2. "isCorrect": If it IS an attempt, is it technically correct or an acceptable synonymous variant/acronym (e.g. "microservices" for "microservices architecture", "put" for "HTTP PUT")?\n\n` +
+                            `Respond with ONLY valid JSON: {"isAttempt": true/false, "isCorrect": true/false}`
                         )
                     }
                 ];
 
-                const res = await this.llmManager.chat(evalPrompt, { maxTokens: 10, temperature: 0.0 });
-                const verdict = (typeof res === 'string' ? res : (res?.content || '')).trim().toUpperCase();
-                if (verdict.includes('CORRECT') && !verdict.includes('INCORRECT')) {
+                const res = await this.llmManager.chat(evalPrompt, { maxTokens: 25, temperature: 0.0 });
+                const rawVerdict = (typeof res === 'string' ? res : (res?.content || '')).trim();
+                const jsonMatch = rawVerdict.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    isAttempt = parsed.isAttempt === true;
+                    isCorrect = isAttempt && parsed.isCorrect === true;
+                } else if (rawVerdict.includes('CORRECT') && !rawVerdict.includes('INCORRECT')) {
+                    isAttempt = true;
                     isCorrect = true;
+                } else if (looksConversational) {
+                    isAttempt = false;
                 }
             } catch (e) {
-                // Fall back to local evaluation
+                if (looksConversational) {
+                    isAttempt = false;
+                }
+            }
+        }
+
+        // If the message was off-topic casual conversation, DO NOT burn the card!
+        if (!isAttempt) {
+            return {
+                ignored: true,
+                isAttempt: false,
+                currentDescription: currentCard.description,
+                deckName: session.deckName
+            };
+        }
+
+        // Track participant statistics
+        if (speakerId) {
+            if (!session.participants) session.participants = {};
+            if (!session.participants[speakerId]) {
+                session.participants[speakerId] = { name: speakerName, correct: 0, answers: 0 };
+            }
+            session.participants[speakerId].answers++;
+            if (isCorrect) {
+                session.participants[speakerId].correct++;
             }
         }
 
@@ -632,26 +740,23 @@ class StudyService {
             session.score.incorrect++;
         }
 
-        // Build feedback according to user's strict format specification:
-        // If correct: "Correct!"
-        // If incorrect: "Incorrect. The answer is: [Word Answer]"
         const feedback = isCorrect
             ? 'Correct!'
             : `Incorrect. The answer is: **${targetAnswer}**`;
 
-        // Advance to next card
         session.currentIndex++;
 
         if (session.currentIndex >= session.totalCards) {
-            // Deck complete!
             this.activeSessions.delete(channelId);
             const total = session.totalCards;
             const correct = session.score.correct;
             const pct = Math.round((correct / total) * 100);
 
             return {
+                isAttempt: true,
                 isCorrect,
                 feedback,
+                targetAnswer,
                 finished: true,
                 isFinished: true,
                 score: {
@@ -660,24 +765,27 @@ class StudyService {
                     total,
                     percentage: pct
                 },
-                deckName: session.deckName
+                deckName: session.deckName,
+                participants: session.participants || {}
             };
         }
 
-        // Pull next card
         const nextCardIndex = session.shuffledIndices[session.currentIndex];
         const nextCard = this.decks[deckKey][nextCardIndex];
         session.currentCard = nextCard;
 
         return {
+            isAttempt: true,
             isCorrect,
             feedback,
+            targetAnswer,
             finished: false,
             isFinished: false,
             nextDescription: nextCard.description,
             cardNumber: session.currentIndex + 1,
             totalCards: session.totalCards,
-            deckName: session.deckName
+            deckName: session.deckName,
+            participants: session.participants || {}
         };
     }
 }
