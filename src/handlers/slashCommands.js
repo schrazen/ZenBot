@@ -265,6 +265,75 @@ const slashCommands = [
             opt.setName('deck')
                 .setDescription('Deck name (default: acads)')
                 .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('bot')
+        .setDescription('Manage ZenBot Discord profile, status, bio, and presence (Owner only)')
+        .addSubcommand(sub =>
+            sub.setName('profile')
+                .setDescription('View current bot profile, status, bio, and uptime')
+        )
+        .addSubcommand(sub =>
+            sub.setName('status')
+                .setDescription('Change bot activity status name and type')
+                .addStringOption(opt =>
+                    opt.setName('text')
+                        .setDescription('Status or activity text')
+                        .setRequired(true)
+                )
+                .addStringOption(opt =>
+                    opt.setName('type')
+                        .setDescription('Activity type')
+                        .setRequired(false)
+                        .addChoices(
+                            { name: 'Watching', value: 'watching' },
+                            { name: 'Playing', value: 'playing' },
+                            { name: 'Listening to', value: 'listening' },
+                            { name: 'Competing in', value: 'competing' }
+                        )
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('bio')
+                .setDescription('Update the bot\'s Discord "About Me" application bio')
+                .addStringOption(opt =>
+                    opt.setName('text')
+                        .setDescription('New bio text')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('presence')
+                .setDescription('Change online presence state')
+                .addStringOption(opt =>
+                    opt.setName('status')
+                        .setDescription('Online presence')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Online (Green)', value: 'online' },
+                            { name: 'Idle (Orange)', value: 'idle' },
+                            { name: 'Do Not Disturb (Red)', value: 'dnd' }
+                        )
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('username')
+                .setDescription('Change bot username (2 changes per hour limit)')
+                .addStringOption(opt =>
+                    opt.setName('name')
+                        .setDescription('New bot username')
+                        .setRequired(true)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('avatar')
+                .setDescription('Change bot avatar picture')
+                .addStringOption(opt =>
+                    opt.setName('url')
+                        .setDescription('Image URL for avatar')
+                        .setRequired(true)
+                )
         )
 ];
 

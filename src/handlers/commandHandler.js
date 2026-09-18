@@ -5,13 +5,15 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService }) {
+    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
         this.channelHistory = channelHistory;
         this.ownerAvailability = ownerAvailability;
         this.studyService = studyService;
+        this.botProfileService = botProfileService;
+        this.client = client;
     }
 
     /**
@@ -117,6 +119,13 @@ class CommandHandler {
             case 'quiz':
             case 'review':
                 return await this.cmdStudy(message, args, cmd);
+            case 'bot':
+            case 'botprofile':
+            case 'botinfo':
+            case 'setstatus':
+            case 'setbio':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can manage bot profile details.');
+                return await this.cmdBot(message, args, cmd);
             default:
                 return await message.reply(`Unknown command \`!${cmd}\`. Use \`!help\` to see the full list.`);
         }
@@ -188,6 +197,12 @@ class CommandHandler {
                     value: (
                         '`!availability [status|on|off|away|sleep|auto] [duration]` — Owner availability & auto-reply detection\n' +
                         '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord (or reply with `!roast`)\n' +
+                        '`!bot [info|profile]` — Inspect bot profile, presence, and bio\n' +
+                        '`!bot status <text>` or `!setstatus <text>` — Change status / activity\n' +
+                        '`!bot activity <type> <text>` — Change activity type (watching, playing, etc.)\n' +
+                        '`!bot presence <online|idle|dnd>` — Change online state\n' +
+                        '`!bot bio <text>` or `!setbio <text>` — Update Discord "About Me" bio\n' +
+                        '`!bot name <name>` / `!bot avatar <url>` — Change username or avatar\n' +
                         '`!humor <0-5>` — Set humor intensity (0=serious, 2=natural, 4=shitpost, 5=degeneracy)\n' +
                         '`!provider <groq|gemini>` — Switch active AI provider\n' +
                         '`!model <name>` — Switch active LLM model\n' +
@@ -1266,6 +1281,178 @@ class CommandHandler {
     }
 
     /**
+     * Owner-only command to manage bot profile details:
+     * - !bot [info|profile]
+     * - !bot status <text>
+     * - !bot activity <watching|playing|listening|competing> <text>
+     * - !bot presence <online|idle|dnd>
+     * - !bot bio <text>
+     * - !bot name <new_name>
+     * - !bot avatar <url>
+     * - !setstatus <text>
+     * - !setbio <text>
+     */
+    async cmdBot(message, args = [], originalCmd = 'bot') {
+        if (!this.botProfileService) {
+            return await message.reply('Bot profile service is not initialized.');
+        }
+
+        const client = this.client || message.client;
+
+        // Shortcut: !setstatus <text>
+        if (originalCmd === 'setstatus') {
+            const text = args.join(' ').trim();
+            if (!text) {
+                return await message.reply('Usage: `!setstatus <status text>` (e.g. `!setstatus Watching over Lance`)');
+            }
+            const res = await this.botProfileService.setActivity(text, 'Watching', client);
+            return await message.reply(`✅ ${res.message}`);
+        }
+
+        // Shortcut: !setbio <text>
+        if (originalCmd === 'setbio') {
+            const bioText = args.join(' ').trim();
+            if (!bioText) {
+                return await message.reply('Usage: `!setbio <bio text>`');
+            }
+            const res = await this.botProfileService.setBio(bioText, client, this.config.discord.token);
+            return await message.reply(res.success ? `✅ ${res.message}` : `❌ ${res.message}`);
+        }
+
+        const sub = (args[0] || '').toLowerCase();
+        const rest = args.slice(1).join(' ').trim();
+
+        // 1. STATUS / ACTIVITY NAME
+        if (sub === 'status') {
+            if (!rest) {
+                const p = this.botProfileService.getProfile();
+                return await message.reply(`Current status: **${p.activityType} "${p.activity}"**\nTo change: \`!bot status <new text>\``);
+            }
+            const res = await this.botProfileService.setActivity(rest, null, client);
+            return await message.reply(`✅ ${res.message}`);
+        }
+
+        // 2. ACTIVITY TYPE & TEXT
+        if (sub === 'activity') {
+            const validTypes = ['watching', 'playing', 'listening', 'competing', 'streaming', 'custom'];
+            const firstWord = (args[1] || '').toLowerCase();
+            let type = 'Watching';
+            let activityText = '';
+
+            if (validTypes.includes(firstWord)) {
+                type = firstWord;
+                activityText = args.slice(2).join(' ').trim();
+            } else {
+                activityText = args.slice(1).join(' ').trim();
+            }
+
+            if (!activityText) {
+                return await message.reply('Usage: `!bot activity <watching|playing|listening|competing> <text>`\nExample: `!bot activity playing Valorant`');
+            }
+
+            const res = await this.botProfileService.setActivity(activityText, type, client);
+            return await message.reply(`✅ ${res.message}`);
+        }
+
+        // 3. PRESENCE STATUS
+        if (sub === 'presence' || sub === 'state') {
+            if (!rest) {
+                const p = this.botProfileService.getProfile();
+                return await message.reply(`Current presence: **${p.presence.toUpperCase()}** (Options: \`online\`, \`idle\`, \`dnd\`)`);
+            }
+            const res = await this.botProfileService.setPresenceStatus(rest, client);
+            return await message.reply(`✅ ${res.message}`);
+        }
+
+        // 4. BIO / ABOUT ME
+        if (sub === 'bio' || sub === 'aboutme' || sub === 'desc' || sub === 'description') {
+            if (!rest) {
+                const currentBio = await this.botProfileService.fetchBio(this.config.discord.token);
+                return await message.reply(`Current About Me bio:\n>>> ${currentBio || '_No bio set_'}\n\nTo update: \`!bot bio <new bio text>\``);
+            }
+            const res = await this.botProfileService.setBio(rest, client, this.config.discord.token);
+            return await message.reply(res.success ? `✅ ${res.message}` : `❌ ${res.message}`);
+        }
+
+        // 5. USERNAME
+        if (sub === 'name' || sub === 'username') {
+            if (!rest) {
+                return await message.reply(`Current username: **${client?.user?.username || 'ZenBot'}**\nTo change: \`!bot name <new_name>\` *(Discord limits this to 2 changes per hour)*`);
+            }
+            const res = await this.botProfileService.setUsername(rest, client);
+            return await message.reply(res.success ? `✅ ${res.message}` : `❌ ${res.message}`);
+        }
+
+        // 6. AVATAR
+        if (sub === 'avatar' || sub === 'icon' || sub === 'pfp') {
+            let avatarUrl = rest;
+            if (message.attachments?.size > 0) {
+                const img = message.attachments.find(a => a.contentType?.startsWith('image/'));
+                if (img) avatarUrl = img.url;
+            }
+
+            if (!avatarUrl) {
+                return await message.reply('Please provide an image URL or attach an image: `!bot avatar <url>`');
+            }
+
+            const res = await this.botProfileService.setAvatar(avatarUrl, client);
+            return await message.reply(res.success ? `✅ ${res.message}` : `❌ ${res.message}`);
+        }
+
+        // 7. DEFAULT: INFO / PROFILE EMBED
+        const profile = this.botProfileService.getProfile();
+        const user = client?.user;
+        const uptimeSec = Math.floor(process.uptime());
+        const uptimeStr = `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m ${uptimeSec % 60}s`;
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🤖 ${user?.username || 'ZenBot'} Profile & Presence`)
+            .setColor(0x7209b7)
+            .setThumbnail(user?.displayAvatarURL({ dynamic: true, size: 256 }) || null)
+            .addFields(
+                {
+                    name: 'Status & Activity',
+                    value: (
+                        `• Presence: **${(profile.presence || 'online').toUpperCase()}**\n` +
+                        `• Activity: **${profile.activityType || 'Watching'}** "${profile.activity || 'None'}"`
+                    ),
+                    inline: false
+                },
+                {
+                    name: 'About Me (Bio)',
+                    value: profile.bio ? `>>> ${profile.bio.slice(0, 800)}` : '_No bio set on application._',
+                    inline: false
+                },
+                {
+                    name: 'Client Details',
+                    value: (
+                        `• Tag: **${user?.tag || 'ZenBot#0000'}**\n` +
+                        `• Bot ID: \`${user?.id || 'Unknown'}\`\n` +
+                        `• Uptime: **${uptimeStr}**\n` +
+                        `• Guilds: **${client?.guilds?.cache?.size || 0}** connected`
+                    ),
+                    inline: false
+                },
+                {
+                    name: 'Owner Commands',
+                    value: (
+                        '`!bot status <text>` — Change status/activity\n' +
+                        '`!bot activity <watching|playing|listening|competing> <text>`\n' +
+                        '`!bot presence <online|idle|dnd>` — Online presence\n' +
+                        '`!bot bio <text>` — Update Discord "About Me"\n' +
+                        '`!bot name <name>` — Change username (2/hr limit)\n' +
+                        '`!bot avatar <url>` — Change profile picture'
+                    ),
+                    inline: false
+                }
+            )
+            .setFooter({ text: 'ZenBot Profile Manager • Persistent across restarts' })
+            .setTimestamp();
+
+        return await message.reply({ embeds: [embed] });
+    }
+
+    /**
      * Handles Discord Slash Command interactions (/help, /status, /roll, etc.)
      */
     async handleInteraction(interaction) {
@@ -1495,6 +1682,34 @@ class CommandHandler {
                 case 'quiz': {
                     const deck = interaction.options.getString('deck') || 'acads';
                     return await this.cmdStudy(adapter, ['quiz', deck], 'quiz');
+                }
+
+                case 'bot': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can manage bot profile details.');
+                    }
+                    const sub = interaction.options.getSubcommand(false) || 'profile';
+                    if (sub === 'status') {
+                        const text = interaction.options.getString('text') || '';
+                        const type = interaction.options.getString('type') || '';
+                        return await this.cmdBot(adapter, ['activity', type || 'watching', text]);
+                    } else if (sub === 'bio') {
+                        await defer();
+                        const text = interaction.options.getString('text') || '';
+                        return await this.cmdBot(adapter, ['bio', text]);
+                    } else if (sub === 'presence') {
+                        const status = interaction.options.getString('status') || 'online';
+                        return await this.cmdBot(adapter, ['presence', status]);
+                    } else if (sub === 'username') {
+                        await defer();
+                        const name = interaction.options.getString('name') || '';
+                        return await this.cmdBot(adapter, ['name', name]);
+                    } else if (sub === 'avatar') {
+                        await defer();
+                        const url = interaction.options.getString('url') || '';
+                        return await this.cmdBot(adapter, ['avatar', url]);
+                    }
+                    return await this.cmdBot(adapter, ['profile']);
                 }
 
                 default:

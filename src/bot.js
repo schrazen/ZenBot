@@ -7,6 +7,7 @@ const MessageHandler = require('./handlers/messageHandler');
 const ChannelHistoryService = require('./services/channelHistory');
 const OwnerAvailabilityService = require('./services/ownerAvailability');
 const StudyService = require('./services/studyService');
+const BotProfileService = require('./services/botProfileService');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -40,6 +41,9 @@ class ZenBot {
             config: this.config,
             llmManager: this.llmManager
         });
+        this.botProfileService = new BotProfileService({
+            config: this.config
+        });
 
         this.commandHandler = new CommandHandler({
             config: this.config,
@@ -47,7 +51,9 @@ class ZenBot {
             memoryManager: this.memoryManager,
             channelHistory: this.channelHistory,
             ownerAvailability: this.ownerAvailability,
-            studyService: this.studyService
+            studyService: this.studyService,
+            botProfileService: this.botProfileService,
+            client: this.client
         });
 
         this.messageHandler = new MessageHandler({
@@ -56,17 +62,17 @@ class ZenBot {
             memoryManager: this.memoryManager,
             commandHandler: this.commandHandler,
             channelHistory: this.channelHistory,
-            client: this.client,
             ownerAvailability: this.ownerAvailability,
-            studyService: this.studyService
+            studyService: this.studyService,
+            client: this.client
         });
 
         this.commandHandler.messageHandler = this.messageHandler;
 
-        this._setupEvents();
+        this.setupEventHandlers();
     }
 
-    _setupEvents() {
+    setupEventHandlers() {
         this.client.once(Events.ClientReady || 'ready', () => {
             logger.success(`=============================================`);
             logger.success(`ZenBot online as: ${this.client.user.tag}`);
@@ -77,7 +83,12 @@ class ZenBot {
             logger.info(`Connected Servers (${servers.length}): ${servers.join(', ') || 'None'}`);
             logger.success(`=============================================`);
 
-            this.client.user.setActivity('Bisaya si Ed | /help', { type: ActivityType.Watching });
+            this.botProfileService.applyPresence(this.client);
+            this.botProfileService.watchProfile(this.client);
+
+            if (!this.botProfileService.getProfile().bio) {
+                this.botProfileService.fetchBio(this.config.discord.token).catch(() => {});
+            }
 
             // Ensure slash commands are synced with Discord on startup
             registerSlashCommands(this.config).catch(err => {

@@ -9,6 +9,7 @@ const PID_FILE = path.join(DATA_DIR, 'zenbot.pid');
 const LOG_FILE = path.join(DATA_DIR, 'zenbot.log');
 const DECKS_FILE = path.join(DATA_DIR, 'study_decks.json');
 const MEMORIES_FILE = path.join(DATA_DIR, 'memories.json');
+const BOT_PROFILE_FILE = path.join(DATA_DIR, 'bot_profile.json');
 const ENV_FILE = path.join(ROOT_DIR, 'zen.env');
 
 // ANSI Color helper
@@ -108,12 +109,84 @@ function getDataSummary() {
 }
 
 /**
+ * Reads bot profile and presence configuration
+ */
+function getBotProfile() {
+    if (fs.existsSync(BOT_PROFILE_FILE)) {
+        try {
+            return JSON.parse(fs.readFileSync(BOT_PROFILE_FILE, 'utf8'));
+        } catch (e) {}
+    }
+    return {
+        activity: 'Bisaya si Ed | /help',
+        activityType: 'Watching',
+        presence: 'online',
+        bio: ''
+    };
+}
+
+/**
+ * Saves bot profile and presence configuration
+ */
+function saveBotProfile(updates = {}) {
+    try {
+        const current = getBotProfile();
+        const merged = { ...current, ...updates, updatedAt: Date.now() };
+        if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
+        fs.writeFileSync(BOT_PROFILE_FILE, JSON.stringify(merged, null, 2), 'utf8');
+        return merged;
+    } catch (e) {
+        console.log(`${c.red}Failed to save bot_profile.json: ${e.message}${c.reset}`);
+        return null;
+    }
+}
+
+/**
+ * Extracts Discord token from zen.env
+ */
+function getDiscordToken() {
+    if (fs.existsSync(ENV_FILE)) {
+        try {
+            const raw = fs.readFileSync(ENV_FILE, 'utf8');
+            const m = raw.match(/^DISCORD_TOKEN\s*=\s*(.+)$/m);
+            if (m) return m[1].trim().replace(/^["']|["']$/g, '');
+        } catch (e) {}
+    }
+    return process.env.DISCORD_TOKEN || '';
+}
+
+/**
+ * Updates application bio description directly on Discord API via REST
+ */
+async function updateBioRemote(newBio) {
+    const token = getDiscordToken();
+    if (!token) {
+        console.log(`\n${c.yellow}[!] DISCORD_TOKEN not found in zen.env. Saved to bot_profile.json only.${c.reset}`);
+        return;
+    }
+
+    try {
+        const { REST, Routes } = require('discord.js');
+        const rest = new REST({ version: '10' }).setToken(token);
+        await rest.patch(Routes.currentApplication(), {
+            body: { description: newBio }
+        });
+        console.log(`\n${c.green}✓ Bot "About Me" bio updated directly on Discord API!${c.reset}`);
+    } catch (e) {
+        console.log(`\n${c.red}✗ Failed to update Discord bio via REST: ${e.message}${c.reset}`);
+    }
+}
+
+/**
  * Formats status output
  */
 function printStatus(verbose = false) {
     const procs = findZenProcesses();
     const env = getEnvSummary();
     const data = getDataSummary();
+    const prof = getBotProfile();
 
     const isRunning = procs.length > 0;
     const statusTag = isRunning
@@ -124,6 +197,7 @@ function printStatus(verbose = false) {
     console.log(`                   ${c.yellow}⚡ ZENBOT CONTROL CENTER ⚡${c.reset}`);
     console.log(`${c.cyan}${c.bold}======================================================================${c.reset}`);
     console.log(`  Status:     ${statusTag}`);
+    console.log(`  Presence:   ${c.yellow}${prof.activityType || 'Watching'}${c.reset} "${prof.activity || 'None'}" [${c.green}${c.bold}${(prof.presence || 'online').toUpperCase()}${c.reset}]`);
     console.log(`  AI Engine:  ${c.bold}${env.provider.toUpperCase()}${c.reset} [${env.model}] (Gemini Fallback: active)`);
     console.log(`  Data:       ${c.magenta}${data.deckCount} study deck(s)${c.reset} (${data.cardCount} cards) | ${c.blue}${data.factCount} persistent facts${c.reset}`);
     console.log(`  Directory:  ${c.dim}${ROOT_DIR}${c.reset}`);
@@ -299,6 +373,102 @@ function registerSlash() {
 }
 
 /**
+ * Sub-menu for managing bot profile, presence, and bio
+ */
+function manageBotProfile(rl, backCallback) {
+    const prof = getBotProfile();
+    console.log(`\n${c.magenta}${c.bold}======================================================================${c.reset}`);
+    console.log(`                   ${c.yellow}🤖 BOT DISCORD PROFILE & PRESENCE 🤖${c.reset}`);
+    console.log(`${c.magenta}${c.bold}======================================================================${c.reset}`);
+    console.log(`  Current Activity: ${c.bold}${prof.activityType || 'Watching'}${c.reset} "${c.cyan}${prof.activity || 'None'}${c.reset}"`);
+    console.log(`  Current Presence: ${c.green}${c.bold}${(prof.presence || 'online').toUpperCase()}${c.reset}`);
+    console.log(`  Current Bio:      ${c.dim}${prof.bio ? prof.bio.slice(0, 100) : '(No bio set)'}${c.reset}`);
+    console.log(`${c.magenta}----------------------------------------------------------------------${c.reset}`);
+    console.log(`  ${c.bold}[1]${c.reset} Change Status / Activity Name`);
+    console.log(`  ${c.bold}[2]${c.reset} Change Activity Type (Watching / Playing / Listening / Competing)`);
+    console.log(`  ${c.bold}[3]${c.reset} Change Online Presence (Online / Idle / DND)`);
+    console.log(`  ${c.bold}[4]${c.reset} Change Application Bio / About Me (Syncs to Discord)`);
+    console.log(`  ${c.bold}[0]${c.reset} Return to Main Menu`);
+    console.log(`${c.magenta}----------------------------------------------------------------------${c.reset}`);
+
+    rl.question(`\n${c.bold}Profile>${c.reset} `, async (ans) => {
+        const choice = ans.trim();
+        switch (choice) {
+            case '1':
+                rl.question(`\nEnter new activity text (e.g. Bisaya si Ed | /help): `, (text) => {
+                    const clean = text.trim();
+                    if (clean) {
+                        saveBotProfile({ activity: clean });
+                        console.log(`\n${c.green}✓ Status name updated to: "${clean}"${c.reset}`);
+                        console.log(`${c.dim}(Live bot will auto-reload presence within seconds)${c.reset}`);
+                    }
+                    setTimeout(() => manageBotProfile(rl, backCallback), 1000);
+                });
+                break;
+
+            case '2':
+                console.log(`\nSelect Activity Type:`);
+                console.log(`  [1] Watching`);
+                console.log(`  [2] Playing`);
+                console.log(`  [3] Listening to`);
+                console.log(`  [4] Competing in`);
+                rl.question(`Choice (1-4): `, (typeChoice) => {
+                    const map = { '1': 'Watching', '2': 'Playing', '3': 'Listening', '4': 'Competing' };
+                    const selected = map[typeChoice.trim()];
+                    if (selected) {
+                        saveBotProfile({ activityType: selected });
+                        console.log(`\n${c.green}✓ Activity type updated to: ${selected}${c.reset}`);
+                    } else {
+                        console.log(`\n${c.yellow}Invalid choice.${c.reset}`);
+                    }
+                    setTimeout(() => manageBotProfile(rl, backCallback), 1000);
+                });
+                break;
+
+            case '3':
+                console.log(`\nSelect Presence Status:`);
+                console.log(`  [1] Online (Green)`);
+                console.log(`  [2] Idle (Orange)`);
+                console.log(`  [3] Do Not Disturb (Red)`);
+                rl.question(`Choice (1-3): `, (pChoice) => {
+                    const map = { '1': 'online', '2': 'idle', '3': 'dnd' };
+                    const selected = map[pChoice.trim()];
+                    if (selected) {
+                        saveBotProfile({ presence: selected });
+                        console.log(`\n${c.green}✓ Presence updated to: ${selected.toUpperCase()}${c.reset}`);
+                    } else {
+                        console.log(`\n${c.yellow}Invalid choice.${c.reset}`);
+                    }
+                    setTimeout(() => manageBotProfile(rl, backCallback), 1000);
+                });
+                break;
+
+            case '4':
+                rl.question(`\nEnter new "About Me" bio text: `, async (newBio) => {
+                    const clean = newBio.trim();
+                    if (clean) {
+                        saveBotProfile({ bio: clean });
+                        await updateBioRemote(clean);
+                    }
+                    setTimeout(() => manageBotProfile(rl, backCallback), 1500);
+                });
+                break;
+
+            case '0':
+            case 'back':
+            case 'exit':
+                backCallback();
+                break;
+
+            default:
+                console.log(`\n${c.yellow}Unknown option.${c.reset}`);
+                setTimeout(() => manageBotProfile(rl, backCallback), 1000);
+                break;
+        }
+    });
+}
+
+/**
  * Interactive Menu loop
  */
 function runMenu() {
@@ -317,6 +487,7 @@ function runMenu() {
         console.log(`  ${c.bold}[6]${c.reset} Sync / Register Slash Commands`);
         console.log(`  ${c.bold}[7]${c.reset} View Daemon Logs`);
         console.log(`  ${c.bold}[8]${c.reset} Run in Current Window (Foreground)`);
+        console.log(`  ${c.bold}[9]${c.reset} Manage Discord Profile (Status / Bio / Presence)`);
         console.log(`  ${c.bold}[0]${c.reset} Exit Control Center`);
         console.log(`${c.cyan}----------------------------------------------------------------------${c.reset}`);
 
@@ -383,6 +554,12 @@ function runMenu() {
                     });
                     break;
 
+                case '9':
+                case 'profile':
+                case 'bot':
+                    manageBotProfile(rl, () => showPrompt());
+                    break;
+
                 case '0':
                 case 'exit':
                 case 'quit':
@@ -393,7 +570,7 @@ function runMenu() {
                     break;
 
                 default:
-                    console.log(`\n${c.yellow}Unknown option "${answer}". Choose 0-8 or on/off/restart.${c.reset}`);
+                    console.log(`\n${c.yellow}Unknown option "${answer}". Choose 0-9 or on/off/restart.${c.reset}`);
                     setTimeout(showPrompt, 1500);
                     break;
             }
@@ -437,6 +614,57 @@ switch (arg) {
         printStatus(true);
         break;
 
+    case 'bot':
+    case 'profile':
+    case 'bot-profile': {
+        const prof = getBotProfile();
+        console.log(`\n${c.magenta}======================================================================${c.reset}`);
+        console.log(`                   ${c.yellow}🤖 BOT DISCORD PROFILE & PRESENCE 🤖${c.reset}`);
+        console.log(`${c.magenta}======================================================================${c.reset}`);
+        console.log(`  Status Name:   "${prof.activity || 'None'}"`);
+        console.log(`  Activity Type: ${prof.activityType || 'Watching'}`);
+        console.log(`  Presence:      ${(prof.presence || 'online').toUpperCase()}`);
+        console.log(`  Bio/About Me:  ${prof.bio || '(None)'}`);
+        console.log(`${c.magenta}======================================================================${c.reset}\n`);
+        break;
+    }
+
+    case 'set-status':
+    case 'status-set': {
+        const text = process.argv.slice(3).join(' ').trim();
+        if (!text) {
+            console.log(`\nUsage: node scripts/ctl.js set-status "Your status text"`);
+            process.exit(1);
+        }
+        saveBotProfile({ activity: text });
+        console.log(`\n${c.green}[✓] Updated bot activity to: "${text}"${c.reset}`);
+        console.log(`${c.dim}(Live bot will auto-reload presence within seconds)${c.reset}\n`);
+        break;
+    }
+
+    case 'set-bio':
+    case 'bio-set': {
+        const bio = process.argv.slice(3).join(' ').trim();
+        if (!bio) {
+            console.log(`\nUsage: node scripts/ctl.js set-bio "Your bio text"`);
+            process.exit(1);
+        }
+        saveBotProfile({ bio });
+        updateBioRemote(bio);
+        break;
+    }
+
+    case 'set-presence': {
+        const presence = (process.argv[3] || '').toLowerCase().trim();
+        if (!['online', 'idle', 'dnd'].includes(presence)) {
+            console.log(`\nUsage: node scripts/ctl.js set-presence [online|idle|dnd]`);
+            process.exit(1);
+        }
+        saveBotProfile({ presence });
+        console.log(`\n${c.green}[✓] Updated bot presence to: ${presence.toUpperCase()}${c.reset}\n`);
+        break;
+    }
+
     case 'logs':
     case 'log':
         showLogs();
@@ -453,6 +681,6 @@ switch (arg) {
         break;
 
     default:
-        console.log(`\nUsage: node scripts/ctl.js [on|off|restart|status|bg|logs|register]`);
+        console.log(`\nUsage: node scripts/ctl.js [on|off|restart|status|bg|logs|register|bot|set-status|set-bio|set-presence]`);
         process.exit(1);
 }
