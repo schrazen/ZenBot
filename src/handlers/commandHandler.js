@@ -20,7 +20,13 @@ class CommandHandler {
      * Checks whether a message is a command.
      */
     isCommand(message) {
-        return message.content.trim().startsWith('!');
+        const text = (message.content || '').trim();
+        if (text.startsWith('!')) return true;
+        if (this.client?.user?.id) {
+            const stripped = text.replace(new RegExp(`^<@!?${this.client.user.id}>\\s*`), '').trim();
+            if (stripped.startsWith('!')) return true;
+        }
+        return false;
     }
 
     /**
@@ -36,7 +42,11 @@ class CommandHandler {
      * Dispatches command to specific handlers.
      */
     async handle(message) {
-        const raw = message.content.trim().slice(1);
+        let text = (message.content || '').trim();
+        if (this.client?.user?.id) {
+            text = text.replace(new RegExp(`^<@!?${this.client.user.id}>\\s*`), '').trim();
+        }
+        const raw = text.slice(1);
         const [cmdName, ...args] = raw.split(/\s+/);
         const cmd = cmdName.toLowerCase();
         const argText = args.join(' ').trim();
@@ -114,6 +124,11 @@ class CommandHandler {
                 return await this.cmdClear(message);
             case 'availability':
             case 'avail':
+                if (!argText || argText.toLowerCase() === 'status') {
+                    return await this.cmdAvailability(message, argText, cmd);
+                }
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can change availability status.');
+                return await this.cmdAvailability(message, argText, cmd);
             case 'away':
             case 'afk':
             case 'sleep':

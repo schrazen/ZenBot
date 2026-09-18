@@ -98,10 +98,12 @@ class MessageHandler {
 
         // 1. Record owner activity whenever Lance sends any message in any channel
         if (isOwner && this.ownerAvailability) {
+            const isCmd = this.commandHandler ? this.commandHandler.isCommand(message) : message.content.trim().startsWith('!');
             this.ownerAvailability.recordActivity({
                 type: 'message',
                 channelId: message.channel.id,
-                guildId: message.guild?.id
+                guildId: message.guild?.id,
+                isCommand: isCmd
             });
         }
 
@@ -111,11 +113,22 @@ class MessageHandler {
             const availabilityResult = await this.ownerAvailability.checkAndRespond(message);
             // If the message was directed at or asking about Lance:
             if (availabilityResult.isContact) {
-                // If bot sent an availability auto-reply, OR if the user did NOT explicitly mention ZenBot,
-                // do NOT fall through to general AI chat even in a channel-locked channel!
                 const isBotMentioned = message.mentions.has(this.client.user.id);
-                if (availabilityResult.responded || !isBotMentioned) {
+                // If bot already sent an availability auto-reply, stop here:
+                if (availabilityResult.responded) {
                     return;
+                }
+
+                // If user did NOT explicitly mention ZenBot, stay silent (let Lance answer for himself):
+                if (!isBotMentioned) {
+                    return;
+                }
+
+                // If user DID mention @ZenBot (e.g. "@zen-bot where is lance" or "@zen-bot san si lance"):
+                // Respond with live reality rather than letting Groq LLM hallucinate about Ti-To monitors!
+                if (availabilityResult.state === 'AVAILABLE' || availabilityResult.state === 'LIKELY_AVAILABLE') {
+                    const onlineReply = this.ownerAvailability.generateOnlineResponse(availabilityResult.diffMinutes, message.content);
+                    return await message.reply(onlineReply);
                 }
             }
         }

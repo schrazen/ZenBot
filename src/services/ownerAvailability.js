@@ -97,7 +97,7 @@ class OwnerAvailabilityService {
     /**
      * Records any observed owner activity.
      */
-    recordActivity({ type = 'message', channelId = null, guildId = null, timestamp = Date.now() } = {}) {
+    recordActivity({ type = 'message', channelId = null, guildId = null, timestamp = Date.now(), isCommand = false } = {}) {
         this.data.last_seen_timestamp = timestamp;
 
         if (type === 'message') {
@@ -112,12 +112,13 @@ class OwnerAvailabilityService {
             this.voiceState.lastVoiceTimestamp = timestamp;
         }
 
-        // Auto-clear manual away/sleep if owner is actively chatting or using the bot
-        if (this.data.manual_state && (type === 'message' || type === 'bot_interaction')) {
+        // Auto-clear manual away/sleep ONLY if owner is actively chatting in a server channel
+        // Never clear on bot commands (!), bot interactions, or private DMs
+        if (this.data.manual_state && type === 'message' && guildId && !isCommand) {
             const timeSinceManual = Date.now() - (this.data.manual_set_at || 0);
-            // If manual state was set more than 2 minutes ago, active chatting clears it
-            if (timeSinceManual > 2 * 60 * 1000) {
-                logger.info(`Owner became active; clearing manual state [${this.data.manual_state}]`);
+            // Only auto-clear if manual state was set more than 15 minutes ago and owner is genuinely chatting
+            if (timeSinceManual > 15 * 60 * 1000) {
+                logger.info(`Owner actively chatting in public channel; clearing manual state [${this.data.manual_state}]`);
                 this.data.manual_state = null;
                 this.data.manual_until = null;
                 this.data.manual_reason = null;
@@ -525,9 +526,28 @@ class OwnerAvailabilityService {
     }
 
     /**
+     * Generates an honest response when someone asks where Lance is while he is AVAILABLE.
+     */
+    generateOnlineResponse(diffMinutes = 0, callerMessage = '') {
+        const isTagalog = this.isTagalogMessage(callerMessage);
+        const timeDesc = diffMinutes <= 1 ? 'kanina lang' : `${diffMinutes}m ago`;
+
+        if (isTagalog) {
+            const replies = [
+                `Online naman si Lance ${timeDesc}. Nandyan lang 'yun sa Discord, baka may ginagawa lang saglit. Pwede mo siyang i-ping!`,
+                `Nandito lang si Lance sa Discord kanina (${timeDesc}). Active 'yun sa paligid, i-chat mo na lang directly.`,
+                `Active si Lance sa Discord ${timeDesc}. Baka nagbabasa o may tinatapos lang saglit, replyan ka rin nun.`
+            ];
+            return replies[Math.floor(Math.random() * replies.length)];
+        } else {
+            return `Lance was active just ${timeDesc} on Discord. He's around, feel free to ping him directly!`;
+        }
+    }
+
+    /**
      * Core scanner method: inspects incoming message, evaluates availability,
      * and responds if Lance is away/asleep.
-     * Returns: { isContact: boolean, responded: boolean }
+     * Returns: { isContact: boolean, responded: boolean, state: string, diffMinutes: number }
      */
     async checkAndRespond(message) {
         // 1. Detect contact intent
@@ -540,23 +560,32 @@ class OwnerAvailabilityService {
         const stateInfo = this.getAvailabilityState();
         logger.info(`Owner contact detected from ${message.author.tag}. Inferred state: ${stateInfo.state} (${stateInfo.reason})`);
 
+        const lastActivity = Math.max(
+            this.data.last_seen_timestamp || 0,
+            this.data.last_message_timestamp || 0,
+            this.data.last_bot_interaction || 0,
+            this.data.last_reaction_timestamp || 0,
+            this.voiceState?.lastVoiceTimestamp || 0
+        );
+        const diffMinutes = Math.max(0, Math.floor((Date.now() - lastActivity) / (60 * 1000)));
+
         // If owner is AVAILABLE or LIKELY_AVAILABLE or UNKNOWN -> stay completely silent
         if (stateInfo.state === 'AVAILABLE' || stateInfo.state === 'LIKELY_AVAILABLE' || stateInfo.state === 'UNKNOWN') {
-            return { isContact: true, responded: false, state: stateInfo.state };
+            return { isContact: true, responded: false, state: stateInfo.state, diffMinutes };
         }
 
         // 3. Check cooldowns
         const cd = this.isCooldownActive(message.channel.id, message.author.id);
         if (cd.active) {
             logger.info(`Inactivity auto-reply suppressed by ${cd.type} cooldown (${Math.round(cd.remainingMs / 1000)}s remaining)`);
-            return { isContact: true, responded: false, suppressedByCooldown: true };
+            return { isContact: true, responded: false, suppressedByCooldown: true, state: stateInfo.state, diffMinutes };
         }
 
         // 4. Generate natural response (Tagalog/Taglish & reason aware)
         const customReason = this.data.manual_state ? this.data.manual_reason : null;
         const replyText = this.generateAvailabilityResponse(stateInfo.state, message.content, customReason);
         if (!replyText) {
-            return { isContact: true, responded: false };
+            return { isContact: true, responded: false, state: stateInfo.state, diffMinutes };
         }
 
         try {
@@ -578,10 +607,10 @@ class OwnerAvailabilityService {
             const callerName = message.member?.displayName || message.author.username;
             await this.sendOwnerDmAlert(message, callerName, stateInfo);
 
-            return { isContact: true, responded: true, replyText };
+            return { isContact: true, responded: true, replyText, state: stateInfo.state, diffMinutes };
         } catch (err) {
             logger.error(`Failed to send inactivity reply: ${err.message}`);
-            return { isContact: true, responded: false, error: err.message };
+            return { isContact: true, responded: false, error: err.message, state: stateInfo.state, diffMinutes };
         }
     }
 
