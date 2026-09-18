@@ -108,9 +108,15 @@ class MessageHandler {
         // 2. Check if this is someone looking for or pinging Lance while he is away/asleep
         // (Scans across all server channels, even if they didn't prompt ZenBot)
         if (this.ownerAvailability && message.guild && !isOwner) {
-            const handledByAvailability = await this.ownerAvailability.checkAndRespond(message);
-            if (handledByAvailability) {
-                return;
+            const availabilityResult = await this.ownerAvailability.checkAndRespond(message);
+            // If the message was directed at or asking about Lance:
+            if (availabilityResult.isContact) {
+                // If bot sent an availability auto-reply, OR if the user did NOT explicitly mention ZenBot,
+                // do NOT fall through to general AI chat even in a channel-locked channel!
+                const isBotMentioned = message.mentions.has(this.client.user.id);
+                if (availabilityResult.responded || !isBotMentioned) {
+                    return;
+                }
             }
         }
 

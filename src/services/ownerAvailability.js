@@ -527,12 +527,13 @@ class OwnerAvailabilityService {
     /**
      * Core scanner method: inspects incoming message, evaluates availability,
      * and responds if Lance is away/asleep.
+     * Returns: { isContact: boolean, responded: boolean }
      */
     async checkAndRespond(message) {
         // 1. Detect contact intent
         const intent = await this.detectContactIntent(message);
         if (!intent.isContact) {
-            return false;
+            return { isContact: false, responded: false };
         }
 
         // 2. Evaluate owner availability state
@@ -541,21 +542,21 @@ class OwnerAvailabilityService {
 
         // If owner is AVAILABLE or LIKELY_AVAILABLE or UNKNOWN -> stay completely silent
         if (stateInfo.state === 'AVAILABLE' || stateInfo.state === 'LIKELY_AVAILABLE' || stateInfo.state === 'UNKNOWN') {
-            return false;
+            return { isContact: true, responded: false, state: stateInfo.state };
         }
 
         // 3. Check cooldowns
         const cd = this.isCooldownActive(message.channel.id, message.author.id);
         if (cd.active) {
             logger.info(`Inactivity auto-reply suppressed by ${cd.type} cooldown (${Math.round(cd.remainingMs / 1000)}s remaining)`);
-            return false;
+            return { isContact: true, responded: false, suppressedByCooldown: true };
         }
 
         // 4. Generate natural response (Tagalog/Taglish & reason aware)
         const customReason = this.data.manual_state ? this.data.manual_reason : null;
         const replyText = this.generateAvailabilityResponse(stateInfo.state, message.content, customReason);
         if (!replyText) {
-            return false;
+            return { isContact: true, responded: false };
         }
 
         try {
@@ -577,10 +578,10 @@ class OwnerAvailabilityService {
             const callerName = message.member?.displayName || message.author.username;
             await this.sendOwnerDmAlert(message, callerName, stateInfo);
 
-            return true;
+            return { isContact: true, responded: true, replyText };
         } catch (err) {
             logger.error(`Failed to send inactivity reply: ${err.message}`);
-            return false;
+            return { isContact: true, responded: false, error: err.message };
         }
     }
 
