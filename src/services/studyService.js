@@ -99,9 +99,17 @@ class StudyService {
      */
     getActiveDeck(channelId = null) {
         if (channelId && this.channelActiveDecks.has(channelId)) {
-            return this.channelActiveDecks.get(channelId);
+            const chDeck = this.channelActiveDecks.get(channelId);
+            if (this.decks[chDeck]) return chDeck;
         }
-        return this.defaultDeck || 'acads';
+        if (this.decks[this.defaultDeck]) {
+            return this.defaultDeck;
+        }
+        const available = Object.keys(this.decks).filter(k => !k.startsWith('_'));
+        if (available.length > 0) {
+            return available[0];
+        }
+        return 'acads';
     }
 
     /**

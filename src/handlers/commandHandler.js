@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
@@ -1014,18 +1014,126 @@ class CommandHandler {
             return await message.reply(res.message);
         }
 
-        // 5. VIEW / INSPECT DECK CARDS
+        // 5. VIEW / INSPECT DECK CARDS (PAGINATED EMBED WITH BUTTONS)
         if (sub === 'view' || sub === 'cards' || sub === 'inspect') {
-            const deckName = rest || this.studyService.getActiveDeck(channelId);
+            let deckName = null;
+            let page = 1;
+            const parts = rest.split(/\s+/).filter(Boolean);
+
+            if (parts.length === 1) {
+                if (/^\d+$/.test(parts[0])) {
+                    page = parseInt(parts[0], 10);
+                } else {
+                    deckName = parts[0];
+                }
+            } else if (parts.length >= 2) {
+                if (/^\d+$/.test(parts[parts.length - 1])) {
+                    page = parseInt(parts[parts.length - 1], 10);
+                    deckName = parts.slice(0, -1).join(' ');
+                } else {
+                    deckName = parts.join(' ');
+                }
+            }
+
+            if (!deckName) {
+                deckName = this.studyService.getActiveDeck(channelId);
+            }
+
             const deckInfo = this.studyService.getDeck(deckName, channelId);
             if (!deckInfo.cards || deckInfo.cards.length === 0) {
                 return await message.reply(`Deck **${deckInfo.name}** is empty. Ingest notes with \`!study notes <text>\` or add cards with \`!study addcard <answer> | <description>\`.`);
             }
-            const cardList = deckInfo.cards.slice(0, 15).map((c, i) =>
-                `**${i + 1}.** ${c.description} → ||**${c.answer}**||`
-            ).join('\n');
-            const moreText = deckInfo.cards.length > 15 ? `\n_...and ${deckInfo.cards.length - 15} more terms_` : '';
-            return await message.reply(`📖 **Deck: ${deckInfo.name}** (${deckInfo.cards.length} card${deckInfo.cards.length === 1 ? '' : 's'})${deckInfo.isActive ? ' ⭐ [ACTIVE]' : ''}\n\n${cardList}${moreText}`);
+
+            const PAGE_SIZE = 5;
+            const totalCards = deckInfo.cards.length;
+            const totalPages = Math.max(1, Math.ceil(totalCards / PAGE_SIZE));
+            let currentPage = Math.min(Math.max(1, isNaN(page) ? 1 : page), totalPages);
+
+            const buildEmbed = (p) => {
+                const start = (p - 1) * PAGE_SIZE;
+                const currentCards = deckInfo.cards.slice(start, start + PAGE_SIZE);
+
+                const cardLines = currentCards.map((c, i) => {
+                    const num = start + i + 1;
+                    let desc = (c.description || '').trim();
+                    if (desc.length > 350) desc = desc.slice(0, 347) + '...';
+                    return `**${num}.** ${desc}\n↪ ||**${c.answer}**||`;
+                });
+
+                return new EmbedBuilder()
+                    .setTitle(`📖 Deck: ${deckInfo.name} (${totalCards} card${totalCards === 1 ? '' : 's'})${deckInfo.isActive ? ' ⭐ [ACTIVE]' : ''}`)
+                    .setDescription(cardLines.join('\n\n'))
+                    .setColor(0x4361ee)
+                    .setFooter({
+                        text: `Page ${p} of ${totalPages} (Cards ${start + 1}–${Math.min(start + currentCards.length, totalCards)} of ${totalCards}) • Use !study view [page] or buttons`
+                    });
+            };
+
+            const buildButtons = (p) => {
+                if (totalPages <= 1) return [];
+                return [
+                    new ActionRowBuilder().addComponents(
+                        new ButtonBuilder()
+                            .setCustomId('study_view_prev')
+                            .setLabel('◀️ Prev')
+                            .setStyle(ButtonStyle.Secondary)
+                            .setDisabled(p <= 1),
+                        new ButtonBuilder()
+                            .setCustomId('study_view_badge')
+                            .setLabel(`${p} / ${totalPages}`)
+                            .setStyle(ButtonStyle.Primary)
+                            .setDisabled(true),
+                        new ButtonBuilder()
+                            .setCustomId('study_view_next')
+                            .setLabel('Next ▶️')
+                            .setStyle(ButtonStyle.Secondary)
+                            .setDisabled(p >= totalPages)
+                    )
+                ];
+            };
+
+            const sentMsg = await message.reply({
+                embeds: [buildEmbed(currentPage)],
+                components: buildButtons(currentPage)
+            });
+
+            if (totalPages > 1 && sentMsg && typeof sentMsg.createMessageComponentCollector === 'function') {
+                const authorId = message.author?.id || message.user?.id;
+                const collector = sentMsg.createMessageComponentCollector({
+                    filter: (i) => !authorId || i.user.id === authorId,
+                    time: 180000 // 3 minutes
+                });
+
+                collector.on('collect', async (interaction) => {
+                    if (interaction.customId === 'study_view_prev') {
+                        currentPage = Math.max(1, currentPage - 1);
+                    } else if (interaction.customId === 'study_view_next') {
+                        currentPage = Math.min(totalPages, currentPage + 1);
+                    }
+
+                    try {
+                        await interaction.update({
+                            embeds: [buildEmbed(currentPage)],
+                            components: buildButtons(currentPage)
+                        });
+                    } catch (e) {
+                        logger.warn(`Could not update study view pagination: ${e.message}`);
+                    }
+                });
+
+                collector.on('end', async () => {
+                    try {
+                        const disabledRow = new ActionRowBuilder().addComponents(
+                            new ButtonBuilder().setCustomId('study_view_prev').setLabel('◀️ Prev').setStyle(ButtonStyle.Secondary).setDisabled(true),
+                            new ButtonBuilder().setCustomId('study_view_badge').setLabel(`${currentPage} / ${totalPages}`).setStyle(ButtonStyle.Primary).setDisabled(true),
+                            new ButtonBuilder().setCustomId('study_view_next').setLabel('Next ▶️').setStyle(ButtonStyle.Secondary).setDisabled(true)
+                        );
+                        await sentMsg.edit({ components: [disabledRow] });
+                    } catch (e) {}
+                });
+            }
+
+            return sentMsg;
         }
 
         // 6. ADD SINGLE CARD MANUALLY
@@ -1060,7 +1168,15 @@ class CommandHandler {
             const lines = decks.map(d =>
                 `• **${d.name}**: ${d.cardCount} card${d.cardCount === 1 ? '' : 's'}${d.isActive ? ' ⭐ **[ACTIVE]**' : ''}`
             );
-            return await message.reply(`📂 **Study Decks**:\n${lines.join('\n')}\n\nSwitch active deck with \`!study use <name>\` or start review with \`!quiz\`!`);
+            const content = `📂 **Study Decks**:\n${lines.join('\n')}\n\nSwitch active deck with \`!study use <name>\` or start review with \`!quiz\`!`;
+            if (content.length <= 1900) {
+                return await message.reply(content);
+            }
+            const chunks = splitMessage(content, 1900);
+            for (const chunk of chunks) {
+                await message.reply(chunk);
+            }
+            return;
         }
 
         // 9. CLEAR DECK CARDS
@@ -1205,7 +1321,7 @@ class CommandHandler {
                 } else if (isDeferred || interaction.deferred) {
                     return await interaction.editReply(payload);
                 } else {
-                    return await interaction.reply(payload);
+                    return await interaction.reply({ ...payload, fetchReply: true });
                 }
             }
         };
@@ -1353,7 +1469,11 @@ class CommandHandler {
                         return await this.cmdStudy(adapter, ['rename', `${oldName} ${newName}`]);
                     } else if (sub === 'view') {
                         const deck = interaction.options.getString('deck') || '';
-                        return await this.cmdStudy(adapter, ['view', deck]);
+                        const page = interaction.options.getInteger('page') || 1;
+                        const args = ['view'];
+                        if (deck) args.push(deck);
+                        if (page > 1) args.push(String(page));
+                        return await this.cmdStudy(adapter, args);
                     } else if (sub === 'notes') {
                         await defer();
                         const text = interaction.options.getString('text') || '';

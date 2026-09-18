@@ -93,7 +93,7 @@ function getDataSummary() {
             const decks = JSON.parse(fs.readFileSync(DECKS_FILE, 'utf8'));
             const keys = Object.keys(decks).filter(k => !k.startsWith('_'));
             deckCount = keys.length;
-            cardCount = keys.reduce((sum, k) => sum + (decks[k].cards?.length || 0), 0);
+            cardCount = keys.reduce((sum, k) => sum + (Array.isArray(decks[k]) ? decks[k].length : (decks[k]?.cards?.length || 0)), 0);
         } catch (e) {}
     }
 
@@ -145,9 +145,12 @@ function startLiveWindow() {
     }
 
     console.log(`\n${c.green}[+] Opening ZenBot Live Console in a new window...${c.reset}`);
-    exec('start "ZenBot Live Console" cmd.exe /c "node index.js"', {
-        cwd: ROOT_DIR
+    const child = spawn('cmd.exe', ['/c', 'start', 'ZenBot Live Console', 'cmd.exe', '/c', 'node index.js'], {
+        cwd: ROOT_DIR,
+        detached: true,
+        stdio: 'ignore'
     });
+    child.unref();
     console.log(`  ${c.green}✓ Live Console window launched!${c.reset}`);
     console.log(`  ${c.dim}The Control Center is still active here. Type [3] or 'off' anytime to stop.${c.reset}`);
 }
@@ -194,11 +197,19 @@ function startBackground() {
         fs.mkdirSync(DATA_DIR, { recursive: true });
     }
 
-    exec('cmd.exe /c "start /b node index.js > data\\zenbot.log 2>&1"', {
-        cwd: ROOT_DIR
+    const out = fs.openSync(LOG_FILE, 'a');
+    const err = fs.openSync(LOG_FILE, 'a');
+
+    const child = spawn('node', ['index.js'], {
+        cwd: ROOT_DIR,
+        detached: true,
+        stdio: ['ignore', out, err]
     });
 
+    child.unref();
+
     console.log(`\n${c.green}${c.bold}[✓] ZenBot launched in Background Daemon mode!${c.reset}`);
+    console.log(`  PID:        ${child.pid}`);
     console.log(`  Log File:   ${c.cyan}${LOG_FILE}${c.reset}`);
     console.log(`  To stop:    Run 'start-zenbot.bat off' or choose option [3] in menu.`);
 }

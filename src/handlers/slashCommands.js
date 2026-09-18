@@ -215,6 +215,12 @@ const slashCommands = [
                         .setDescription('Deck name to inspect (defaults to active)')
                         .setRequired(false)
                 )
+                .addIntegerOption(opt =>
+                    opt.setName('page')
+                        .setDescription('Page number to inspect (default: 1)')
+                        .setRequired(false)
+                        .setMinValue(1)
+                )
         )
         .addSubcommand(sub =>
             sub.setName('notes')
