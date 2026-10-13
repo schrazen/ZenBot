@@ -219,14 +219,14 @@ function startLiveWindow() {
     }
 
     console.log(`\n${c.green}[+] Opening ZenBot Live Console in a new window...${c.reset}`);
-    const child = spawn('cmd.exe', ['/c', 'start', 'ZenBot Live Console', 'cmd.exe', '/c', 'node index.js'], {
+    const child = spawn('cmd.exe', ['/c', 'start', 'ZenBot Live Console', 'cmd.exe', '/k', 'title ZenBot Live Console && echo [ZenBot Live Console] && echo Press Ctrl+C to stop or choose option [3] / run "zen.bat off" in Control Center. && echo. && node index.js && echo. && echo ZenBot exited. Press any key to close this window... && pause >nul && exit'], {
         cwd: ROOT_DIR,
         detached: true,
         stdio: 'ignore'
     });
     child.unref();
     console.log(`  ${c.green}✓ Live Console window launched!${c.reset}`);
-    console.log(`  ${c.dim}The Control Center is still active here. Type [3] or 'off' anytime to stop.${c.reset}`);
+    console.log(`  ${c.yellow}Type [3] or 'off' in this menu anytime to stop ZenBot.${c.reset}`);
 }
 
 /**
@@ -582,34 +582,52 @@ function runMenu() {
 const arg = (process.argv[2] || '').toLowerCase();
 
 switch (arg) {
+    case '1':
     case 'on':
     case 'start':
     case 'win':
         startLiveWindow();
         break;
 
+    case '8':
     case 'fg':
     case 'foreground':
         startForeground();
         break;
 
+    case '2':
     case 'bg':
     case 'background':
     case 'daemon':
         startBackground();
         break;
 
+    case '3':
     case 'off':
     case 'stop':
         stopBot();
         break;
 
+    case '4':
     case 'restart':
         restartBot(process.argv.includes('bg') || process.argv.includes('--bg') || process.argv.includes('-bg'));
         break;
 
+    case '5':
     case 'status':
         printStatus(true);
+        break;
+
+    case '6':
+    case 'register':
+    case 'slash':
+        registerSlash();
+        break;
+
+    case '7':
+    case 'logs':
+    case 'log':
+        showLogs();
         break;
 
     case 'bot':

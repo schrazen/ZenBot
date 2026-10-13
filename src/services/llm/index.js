@@ -132,6 +132,91 @@ class LLMManager {
             throw primaryError;
         }
     }
+
+    /**
+     * Executes an agentic loop with tool/function calling support.
+     * Iterates until the model generates a final response or maxSteps is reached.
+     */
+    async chatWithAgent(messages, { tools = null, geminiTools = null, executeTool = null, maxSteps = 5, ...options } = {}) {
+        if (!tools || !executeTool) {
+            return await this.chat(messages, options);
+        }
+
+        const workingMessages = [...messages];
+        const executedTools = [];
+        let currentStep = 0;
+        let lastResponse = null;
+
+        while (currentStep < maxSteps) {
+            currentStep++;
+
+            const currentOptions = {
+                ...options,
+                tools,
+                geminiTools
+            };
+
+            const response = await this.chat(workingMessages, currentOptions);
+            lastResponse = response;
+
+            if (!response.toolCalls || response.toolCalls.length === 0) {
+                // Assistant provided final text answer
+                return {
+                    ...response,
+                    executedTools
+                };
+            }
+
+            // Record assistant tool calls in working messages
+            workingMessages.push({
+                role: 'assistant',
+                content: response.content || '',
+                tool_calls: response.toolCalls
+            });
+
+            // Execute each requested tool call
+            for (const call of response.toolCalls) {
+                const name = call.function?.name;
+                const rawArgs = call.function?.arguments;
+                logger.info(`[Agent Tool Call ${currentStep}] -> ${name}(${typeof rawArgs === 'string' ? rawArgs.slice(0, 100) : JSON.stringify(rawArgs).slice(0, 100)})`);
+
+                let result;
+                try {
+                    result = await executeTool(name, rawArgs);
+                } catch (err) {
+                    result = { error: err.message };
+                }
+
+                executedTools.push({
+                    step: currentStep,
+                    name,
+                    args: rawArgs,
+                    result
+                });
+
+                workingMessages.push({
+                    role: 'tool',
+                    tool_call_id: call.id,
+                    content: typeof result === 'string' ? result : JSON.stringify(result)
+                });
+            }
+        }
+
+        // If loop exceeded maxSteps, make one final call without tools to summarize
+        try {
+            const finalSummary = await this.chat(workingMessages, { ...options, tools: undefined, geminiTools: undefined });
+            return {
+                ...finalSummary,
+                executedTools
+            };
+        } catch (e) {
+            return {
+                content: lastResponse?.content || 'Agent completed all actions.',
+                executedTools,
+                ...lastResponse
+            };
+        }
+    }
 }
 
 module.exports = LLMManager;

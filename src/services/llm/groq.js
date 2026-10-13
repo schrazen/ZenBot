@@ -29,6 +29,11 @@ class GroqProvider {
             temperature: options.temperature ?? this.temperature
         };
 
+        if (options.tools && Array.isArray(options.tools)) {
+            payload.tools = options.tools;
+            payload.tool_choice = options.tool_choice || 'auto';
+        }
+
         const startTime = Date.now();
 
         try {
@@ -54,8 +59,11 @@ class GroqProvider {
                 throw new Error(`Groq API error: ${errMessage}`);
             }
 
-            const reply = data.choices?.[0]?.message?.content;
-            if (!reply) {
+            const rawMsg = data.choices?.[0]?.message;
+            const reply = rawMsg?.content;
+            const toolCalls = rawMsg?.tool_calls || null;
+
+            if (!reply && (!toolCalls || toolCalls.length === 0)) {
                 throw new Error('Groq returned empty response content.');
             }
 
@@ -72,7 +80,9 @@ class GroqProvider {
             this.lastRateLimits = rateLimits;
 
             return {
-                content: reply.trim(),
+                content: (reply || '').trim(),
+                toolCalls,
+                rawMessage: rawMsg,
                 provider: 'groq',
                 model: modelToUse,
                 latencyMs,

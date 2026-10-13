@@ -5,7 +5,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, client }) {
+    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, reminderService, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -13,6 +13,8 @@ class CommandHandler {
         this.ownerAvailability = ownerAvailability;
         this.studyService = studyService;
         this.botProfileService = botProfileService;
+        this.workspaceService = workspaceService;
+        this.reminderService = reminderService;
         this.client = client;
     }
 
@@ -146,6 +148,40 @@ class CommandHandler {
             case 'setbio':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can manage bot profile details.');
                 return await this.cmdBot(message, args, cmd);
+            case 'remind':
+            case 'reminder':
+            case 'alarm':
+                return await this.cmdRemind(message, argText);
+            case 'reminders':
+            case 'alarms':
+                return await this.cmdListReminders(message);
+            case 'delremind':
+            case 'delreminder':
+            case 'cancelreminder':
+                return await this.cmdDeleteReminder(message, argText);
+            case 'readfile':
+            case 'cat':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can inspect workspace files.');
+                return await this.cmdReadFile(message, args);
+            case 'writefile':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can write workspace files.');
+                return await this.cmdWriteFile(message, args, argText);
+            case 'editfile':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can edit workspace files.');
+                return await this.cmdEditFile(message, argText);
+            case 'ls':
+            case 'dir':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can list workspace directories.');
+                return await this.cmdListDir(message, args);
+            case 'search':
+            case 'grep':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can search workspace files.');
+                return await this.cmdSearch(message, args, argText);
+            case 'run':
+            case 'sh':
+            case 'exec':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can execute terminal commands.');
+                return await this.cmdRun(message, argText);
             default:
                 return await message.reply(`Unknown command \`!${cmd}\`. Use \`!help\` to see the full list.`);
         }
@@ -213,22 +249,28 @@ class CommandHandler {
                     )
                 },
                 {
-                    name: 'Owner Controls (Lance Only)',
+                    name: 'Reminders & Life Cadence',
                     value: (
-                        '`!availability [status|on|off|away|sleep|auto] [reason/duration]` — Owner availability status\n' +
-                        '`!away [reason/duration]` / `!sleep` / `!back` — Quick availability shortcuts\n' +
-                        '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord (or reply with `!roast`)\n' +
-                        '`!bot [info|profile]` — Inspect bot profile, presence, and bio\n' +
-                        '`!bot status <text>` or `!setstatus <text>` — Change status / activity\n' +
-                        '`!bot activity <type> <text>` — Change activity type (watching, playing, etc.)\n' +
-                        '`!bot presence <online|idle|dnd>` — Change online state\n' +
-                        '`!bot bio <text>` or `!setbio <text>` — Update Discord "About Me" bio\n' +
-                        '`!bot name <name>` / `!bot avatar <url>` — Change username or avatar\n' +
-                        '`!humor <0-5>` — Set humor intensity (0=serious, 2=natural, 4=shitpost, 5=degeneracy)\n' +
-                        '`!provider <groq|gemini>` — Switch active AI provider\n' +
-                        '`!model <name>` — Switch active LLM model\n' +
-                        '`!remember <fact>` / `!forget <id>` — Store or delete permanent memories\n' +
-                        '`!addgoal <goal>` — Add a new career/dev goal'
+                        '`!remind <time> to <task>` — Schedule a reminder (e.g. `!remind in 30m to check database`, `!remind tomorrow at 8am to submit form`)\n' +
+                        '`!reminders` — List active upcoming reminders\n' +
+                        '`!delremind <id|index>` — Cancel or delete a reminder'
+                    )
+                },
+                {
+                    name: 'Owner Controls & Workspace Hands (Lance Only)',
+                    value: (
+                        '`!readfile <path> [lines]` — View file in project workspace\n' +
+                        '`!writefile <path> <content>` — Create or overwrite a file\n' +
+                        '`!editfile <path> ||| <target> ||| <replacement>` — Surgical text replacement\n' +
+                        '`!ls [dir]` / `!search <query>` — List directory or search code\n' +
+                        '`!run <command>` — Execute terminal command (e.g. `!run git status`)\n' +
+                        '`!availability [status|on|off|away|sleep|auto] [reason]` — Owner status\n' +
+                        '`!away [reason]` / `!sleep` / `!back` — Quick availability shortcuts\n' +
+                        '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord\n' +
+                        '`!bot status <text>` / `!setbio <text>` — Update bot status or bio\n' +
+                        '`!humor <0-5>` — Set humor intensity (0=serious, 2=natural, 5=degeneracy)\n' +
+                        '`!provider <groq|gemini>` / `!model <name>` — Switch AI engine\n' +
+                        '`!remember <fact>` / `!forget <id>` — Permanent memories'
                     )
                 },
                 {
@@ -1764,6 +1806,217 @@ class CommandHandler {
             } else if (!interaction.replied) {
                 return await interaction.reply(errReply);
             }
+        }
+    }
+
+    // ==========================================
+    // REMINDER & LIFE CADENCE COMMANDS
+    // ==========================================
+
+    async cmdRemind(message, argText) {
+        if (!this.reminderService) {
+            return await message.reply('ReminderService is not initialized.');
+        }
+
+        if (!argText || !argText.trim()) {
+            return await message.reply(
+                `⏰ **Reminder Usage:**\n` +
+                `• \`!remind in 30m to check oven\`\n` +
+                `• \`!remind in 2h to review code\`\n` +
+                `• \`!remind tomorrow at 9am to submit clearance\`\n` +
+                `• \`!remind at 5:30pm to walk dogs\`\n` +
+                `*(Or just say "Zen, remind me in 10m to stretch" in DM!)*`
+            );
+        }
+
+        const parsed = this.reminderService.parseNaturalInput(argText);
+        if (!parsed) {
+            return await message.reply(`Could not understand the time expression in: "${argText}".\nTry format: \`!remind <time> to <task>\` (e.g. \`!remind in 15m to take a break\`).`);
+        }
+
+        const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
+        const reminder = this.reminderService.addReminder({
+            userId: message.author.id,
+            channelId: message.channel.id,
+            isDM,
+            task: parsed.task,
+            dueAt: parsed.timestamp,
+            dueTimeStr: parsed.dueStr
+        });
+
+        return await message.reply(
+            `⏰ **Reminder Scheduled!**\n` +
+            `• **Task:** ${reminder.task}\n` +
+            `• **Due:** ${reminder.dueTimeStr}\n` +
+            `• **ID:** \`${reminder.id}\`\n\n` +
+            `*(I will notify you via ${isDM ? 'DM' : 'this channel'} when time is up.)*`
+        );
+    }
+
+    async cmdListReminders(message) {
+        if (!this.reminderService) return await message.reply('ReminderService is not initialized.');
+
+        const list = this.reminderService.listReminders(message.author.id);
+        if (list.length === 0) {
+            return await message.reply('⏰ You have no active upcoming reminders. Set one with `!remind <time> to <task>`.');
+        }
+
+        let desc = list.map((r, i) => `**${i + 1}.** [${r.dueTimeStr}] ${r.task} \`[${r.id}]\``).join('\n');
+        const embed = new EmbedBuilder()
+            .setTitle(`⏰ Active Reminders (${list.length})`)
+            .setDescription(desc)
+            .setColor(0x00b4d8)
+            .setFooter({ text: 'Use !delremind <id or number> to remove a reminder' });
+
+        return await message.reply({ embeds: [embed] });
+    }
+
+    async cmdDeleteReminder(message, argText) {
+        if (!this.reminderService) return await message.reply('ReminderService is not initialized.');
+        if (!argText || !argText.trim()) {
+            return await message.reply('Usage: `!delremind <id or number>` (e.g. `!delremind 1` or `!delremind rem_123456`)');
+        }
+
+        const res = this.reminderService.deleteReminder(argText.trim(), message.author.id);
+        if (res.success) {
+            return await message.reply(`✓ Deleted reminder: **"${res.removed.task}"**`);
+        } else {
+            return await message.reply(res.message);
+        }
+    }
+
+    // ==========================================
+    // WORKSPACE HANDS & SAFE SHELL COMMANDS
+    // ==========================================
+
+    async cmdReadFile(message, args) {
+        if (!this.workspaceService) return await message.reply('WorkspaceService is not initialized.');
+        const filePath = args[0];
+        if (!filePath) return await message.reply('Usage: `!readfile <path> [lines]` (e.g. `!readfile package.json`)');
+
+        const maxLines = parseInt(args[1], 10) || 80;
+        try {
+            const file = await this.workspaceService.readFile(filePath, maxLines);
+            let output = `📄 **File:** \`${file.path}\` (${file.totalLines} lines total, showing lines ${file.startLine}-${file.endLine})\n\`\`\`\n${file.content}\n\`\`\``;
+            if (file.truncated) {
+                output += `\n_...more lines remaining. Use offset or higher limit to read._`;
+            }
+            const chunks = splitMessage(output, 1950);
+            for (const c of chunks) {
+                await message.reply(c);
+            }
+        } catch (err) {
+            return await message.reply(`✗ Error reading file: ${err.message}`);
+        }
+    }
+
+    async cmdWriteFile(message, args, argText) {
+        if (!this.workspaceService) return await message.reply('WorkspaceService is not initialized.');
+        const filePath = args[0];
+        if (!filePath) return await message.reply('Usage: `!writefile <path> <content>`');
+
+        const content = argText.slice(filePath.length).trim();
+        if (!content) return await message.reply('Please provide file content to write.');
+
+        try {
+            const res = await this.workspaceService.writeFile(filePath, content);
+            return await message.reply(`✓ File written to \`${res.path}\` (${res.linesCount} lines, ${res.bytesWritten} bytes).`);
+        } catch (err) {
+            return await message.reply(`✗ Error writing file: ${err.message}`);
+        }
+    }
+
+    async cmdEditFile(message, argText) {
+        if (!this.workspaceService) return await message.reply('WorkspaceService is not initialized.');
+        const parts = argText.split('|||').map(s => s.trim());
+        if (parts.length < 3) {
+            return await message.reply('Usage: `!editfile <path> ||| <targetContent> ||| <replacementContent>`');
+        }
+
+        const [filePath, target, replacement] = parts;
+        try {
+            const res = await this.workspaceService.editFile(filePath, target, replacement);
+            return await message.reply(`✓ Successfully modified \`${res.path}\`.`);
+        } catch (err) {
+            return await message.reply(`✗ Error editing file: ${err.message}`);
+        }
+    }
+
+    async cmdListDir(message, args) {
+        if (!this.workspaceService) return await message.reply('WorkspaceService is not initialized.');
+        const dirPath = args[0] || '.';
+        const depth = parseInt(args[1], 10) || 1;
+
+        try {
+            const res = await this.workspaceService.listDirectory(dirPath, depth);
+            let formatted = `📁 **Directory:** \`${res.directory}\` (${res.entries.length} items)\n\`\`\`\n`;
+            for (const entry of res.entries) {
+                const icon = entry.type === 'dir' ? '[DIR] ' : '      ';
+                const sizeStr = entry.size ? ` (${entry.size} B)` : '';
+                formatted += `${icon} ${entry.path}${sizeStr}\n`;
+            }
+            formatted += '```';
+            const chunks = splitMessage(formatted, 1950);
+            for (const c of chunks) {
+                await message.reply(c);
+            }
+        } catch (err) {
+            return await message.reply(`✗ Error listing directory: ${err.message}`);
+        }
+    }
+
+    async cmdSearch(message, args, argText) {
+        if (!this.workspaceService) return await message.reply('WorkspaceService is not initialized.');
+        const query = args[0];
+        if (!query) return await message.reply('Usage: `!search <query> [dirPath]` (e.g. `!search ReminderService`)');
+
+        const dirPath = args[1] || '.';
+        try {
+            const res = await this.workspaceService.searchFiles(query, dirPath);
+            if (res.matches.length === 0) {
+                return await message.reply(`No matches found for "${query}".`);
+            }
+
+            let text = `🔍 **Search Results for "${query}"** (${res.totalMatches} matches):\n\`\`\`\n`;
+            for (const m of res.matches.slice(0, 15)) {
+                text += `${m.file}:${m.line} -> ${m.text}\n`;
+            }
+            text += '```';
+            return await message.reply(text);
+        } catch (err) {
+            return await message.reply(`✗ Error searching files: ${err.message}`);
+        }
+    }
+
+    async cmdRun(message, argText) {
+        if (!this.workspaceService) return await message.reply('WorkspaceService is not initialized.');
+        if (!argText || !argText.trim()) {
+            return await message.reply('Usage: `!run <command>` (e.g. `!run git status` or `!run node -v`)');
+        }
+
+        try {
+            await message.channel.sendTyping();
+        } catch (e) {}
+
+        try {
+            const res = await this.workspaceService.runCommand(argText.trim());
+            let reply = `💻 **Command:** \`${res.command}\` [Exit: ${res.exitCode}]\n`;
+            if (res.stdout) {
+                reply += `**Output:**\n\`\`\`\n${res.stdout.slice(0, 1500)}\n\`\`\`\n`;
+            }
+            if (res.stderr) {
+                reply += `**Stderr:**\n\`\`\`\n${res.stderr.slice(0, 1000)}\n\`\`\`\n`;
+            }
+            if (!res.stdout && !res.stderr) {
+                reply += `*(No output returned)*`;
+            }
+
+            const chunks = splitMessage(reply, 1950);
+            for (const c of chunks) {
+                await message.reply(c);
+            }
+        } catch (err) {
+            return await message.reply(`✗ Command execution failed: ${err.message}`);
         }
     }
 }

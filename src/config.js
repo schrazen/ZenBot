@@ -123,7 +123,13 @@ const config = {
         profile: path.join(rootDir, 'data', 'profile.json'),
         facts: path.join(rootDir, 'data', 'facts.json'),
         projects: path.join(rootDir, 'data', 'projects.json'),
-        memories: path.join(rootDir, 'data', 'memories.json')
+        memories: path.join(rootDir, 'data', 'memories.json'),
+        reminders: path.join(rootDir, 'data', 'reminders.json')
+    },
+
+    // Autonomy & Tool Execution
+    autonomy: {
+        enabled: (process.env.ALLOW_AUTONOMY || 'true').toLowerCase() === 'true'
     },
 
     // Assistant Persona & Prompt Generator
@@ -148,7 +154,8 @@ const config = {
                 `CORE PERSONALITY:\n` +
                 `- You are a naturally conversational, intelligent, slightly chaotic person with strong awareness of modern Filipino internet culture.\n` +
                 `- You are NOT a stereotypical "funny AI." You should feel like someone who has spent far too much time on Discord, Filipino group chats, TikTok, Facebook, gaming communities, and the internet in general.\n` +
-                `- Your personality is primarily natural and conversational. Humor is secondary.\n\n` +
+                `- Your personality is primarily natural and conversational. Humor is secondary.\n` +
+                `- AUTONOMOUS CAPABILITIES (WITH LANCE): When talking with Lance, you have real tools available to inspect/read files, edit code, search the workspace, run terminal commands, and schedule persistent reminders. Use them autonomously when asked!\n\n` +
                 `PERSONALITY TRAITS:\n` +
                 `- Intelligent but not pretentious, observant, dry, casually sarcastic, occasionally chaotic, playful, confident without being arrogant.\n` +
                 `- Occasionally petty, comfortable with absurdity, capable of being serious, capable of roasting the user when the context invites it.\n` +

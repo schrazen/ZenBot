@@ -8,6 +8,8 @@ const ChannelHistoryService = require('./services/channelHistory');
 const OwnerAvailabilityService = require('./services/ownerAvailability');
 const StudyService = require('./services/studyService');
 const BotProfileService = require('./services/botProfileService');
+const WorkspaceService = require('./services/workspaceService');
+const ReminderService = require('./services/reminderService');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -44,6 +46,13 @@ class ZenBot {
         this.botProfileService = new BotProfileService({
             config: this.config
         });
+        this.workspaceService = new WorkspaceService({
+            rootDir: this.config.paths.root
+        });
+        this.reminderService = new ReminderService({
+            config: this.config,
+            storagePath: this.config.paths.reminders
+        });
 
         this.commandHandler = new CommandHandler({
             config: this.config,
@@ -53,6 +62,8 @@ class ZenBot {
             ownerAvailability: this.ownerAvailability,
             studyService: this.studyService,
             botProfileService: this.botProfileService,
+            workspaceService: this.workspaceService,
+            reminderService: this.reminderService,
             client: this.client
         });
 
@@ -64,6 +75,8 @@ class ZenBot {
             channelHistory: this.channelHistory,
             ownerAvailability: this.ownerAvailability,
             studyService: this.studyService,
+            workspaceService: this.workspaceService,
+            reminderService: this.reminderService,
             client: this.client
         });
 
@@ -85,6 +98,7 @@ class ZenBot {
 
             this.botProfileService.applyPresence(this.client);
             this.botProfileService.watchProfile(this.client);
+            this.reminderService.start(this.client);
 
             if (!this.botProfileService.getProfile().bio) {
                 this.botProfileService.fetchBio(this.config.discord.token).catch(() => {});
@@ -150,6 +164,9 @@ class ZenBot {
 
     async stop() {
         logger.info('Shutting down ZenBot gracefully...');
+        if (this.reminderService) {
+            this.reminderService.stop();
+        }
         this.client.destroy();
         process.exit(0);
     }

@@ -2,7 +2,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, reminderService }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -11,6 +11,8 @@ class MessageHandler {
         this.client = client;
         this.ownerAvailability = ownerAvailability;
         this.studyService = studyService;
+        this.workspaceService = workspaceService;
+        this.reminderService = reminderService;
         this.processedMessageIds = new Set();
         this.showTokens = false;
     }
@@ -387,10 +389,37 @@ class MessageHandler {
                 activeStudySession: activeSession
             });
 
-            // Execute LLM inference
-            const response = await this.llmManager.chat(messages);
+            // Execute LLM inference (with Agent tools for owner Lance, standard chat for server members)
+            let response;
+            const autonomyEnabled = this.config.autonomy?.enabled !== false;
+
+            if (isOwner && autonomyEnabled && (this.workspaceService || this.reminderService)) {
+                const { getGroqTools, getGeminiTools, executeTool } = require('../services/llm/toolDefinitions');
+                const groqTools = getGroqTools();
+                const geminiTools = getGeminiTools();
+
+                response = await this.llmManager.chatWithAgent(messages, {
+                    tools: groqTools,
+                    geminiTools,
+                    executeTool: (name, args) => executeTool(name, args, {
+                        workspaceService: this.workspaceService,
+                        reminderService: this.reminderService,
+                        userId: message.author.id,
+                        channelId: message.channel.id,
+                        isDM
+                    }),
+                    maxSteps: 5
+                });
+            } else {
+                response = await this.llmManager.chat(messages);
+            }
 
             let replyText = response.content;
+            if (response.executedTools && response.executedTools.length > 0) {
+                const toolNames = response.executedTools.map(t => `\`${t.name}\``).join(', ');
+                replyText = `*(🛠️ Executed: ${toolNames})*\n\n` + replyText;
+            }
+
             if (rememberedInline) {
                 replyText = `*(Noted: "${rememberedInline}")*\n\n` + replyText;
             }

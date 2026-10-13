@@ -77,6 +77,10 @@ class GeminiProvider {
             payload.systemInstruction = systemInstruction;
         }
 
+        if (options.geminiTools && Array.isArray(options.geminiTools)) {
+            payload.tools = options.geminiTools;
+        }
+
         const startTime = Date.now();
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${this.apiKey}`;
 
@@ -103,9 +107,27 @@ class GeminiProvider {
             }
 
             const candidate = data.candidates?.[0];
-            const textPart = candidate?.content?.parts?.[0]?.text;
+            const parts = candidate?.content?.parts || [];
+            let textPart = '';
+            const toolCalls = [];
 
-            if (!textPart) {
+            for (const part of parts) {
+                if (part.text) {
+                    textPart += part.text;
+                }
+                if (part.functionCall) {
+                    toolCalls.push({
+                        id: part.functionCall.id || `call_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+                        type: 'function',
+                        function: {
+                            name: part.functionCall.name,
+                            arguments: JSON.stringify(part.functionCall.args || {})
+                        }
+                    });
+                }
+            }
+
+            if (!textPart && toolCalls.length === 0) {
                 if (candidate?.finishReason === 'SAFETY') {
                     throw new Error('Gemini response was blocked due to safety settings.');
                 }
@@ -117,6 +139,7 @@ class GeminiProvider {
 
             return {
                 content: textPart.trim(),
+                toolCalls: toolCalls.length > 0 ? toolCalls : null,
                 provider: 'gemini',
                 model: modelToUse,
                 latencyMs,
