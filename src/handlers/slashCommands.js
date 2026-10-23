@@ -334,7 +334,51 @@ const slashCommands = [
                         .setDescription('Image URL for avatar')
                         .setRequired(true)
                 )
+        ),
+
+    new SlashCommandBuilder()
+        .setName('goal')
+        .setDescription('Manage autonomous AI agent goals (Lance only)')
+        .addStringOption(opt =>
+            opt.setName('action')
+                .setDescription('Goal action')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'start — Launch a new autonomous goal', value: 'start' },
+                    { name: 'status — Check current progress', value: 'status' },
+                    { name: 'pause — Pause active goal', value: 'pause' },
+                    { name: 'resume — Resume paused goal', value: 'resume' },
+                    { name: 'cancel — Stop active goal', value: 'cancel' },
+                    { name: 'history — View past goals', value: 'history' }
+                )
         )
+        .addStringOption(opt =>
+            opt.setName('prompt')
+                .setDescription('Task description if action is "start"')
+                .setRequired(false)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('web')
+        .setDescription('Zero-key DuckDuckGo search')
+        .addStringOption(opt =>
+            opt.setName('query')
+                .setDescription('Search query')
+                .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('learn')
+        .setDescription('Teach ZenBot a new workflow rule or habit (Lance only)')
+        .addStringOption(opt =>
+            opt.setName('rule')
+                .setDescription('Rule or habit to learn (e.g. "Prefer TypeScript over JavaScript")')
+                .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('preferences')
+        .setDescription('View all learned agent preferences & habits (Lance only)')
 ];
 
 /**

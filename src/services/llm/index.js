@@ -1,5 +1,6 @@
 const GroqProvider = require('./groq');
 const GeminiProvider = require('./gemini');
+const HermesProvider = require('./hermes');
 const logger = require('../../utils/logger');
 
 class LLMManager {
@@ -10,6 +11,7 @@ class LLMManager {
         // Initialize providers
         this.providers.set('groq', new GroqProvider(config.llm.groq));
         this.providers.set('gemini', new GeminiProvider(config.llm.gemini));
+        this.providers.set('hermes', new HermesProvider(config.llm.hermes || {}));
 
         // Determine default provider
         let preferred = config.llm.defaultProvider;
@@ -25,6 +27,57 @@ class LLMManager {
 
         this.currentProviderName = preferred;
         logger.info(`LLMManager initialized. Active provider: ${this.currentProviderName}`);
+    }
+
+    /**
+     * Resolves the optimal free specialist model for a specific agentic sub-job.
+     * Prevents rate-limit saturation by distributing load across providers.
+     */
+    getSpecialist(taskType) {
+        switch (taskType) {
+            case 'planning':
+            case 'orchestration':
+                // High intelligence, complex step breakdown
+                return {
+                    provider: this.providers.get('groq'),
+                    model: 'openai/gpt-oss-120b',
+                    temperature: 0.3
+                };
+
+            case 'subtask':
+            case 'evaluation':
+            case 'grading':
+                // Fast execution, high RPM & daily quota (14.4k RPD / fast fallback)
+                return {
+                    provider: this.providers.get('groq'),
+                    model: 'openai/gpt-oss-20b',
+                    temperature: 0.2
+                };
+
+            case 'web_research':
+            case 'synthesis':
+                // Massive token window (1M TPM)
+                return {
+                    provider: this.providers.get('gemini'),
+                    model: 'gemini-3.1-flash-lite',
+                    temperature: 0.5
+                };
+
+            case 'offline':
+            case 'local':
+                return {
+                    provider: this.providers.get('hermes'),
+                    model: 'hermes3:8b',
+                    temperature: 0.7
+                };
+
+            default:
+                return {
+                    provider: this.getCurrentProvider(),
+                    model: this.getCurrentProvider()?.model,
+                    temperature: 0.7
+                };
+        }
     }
 
     getProvider(name) {

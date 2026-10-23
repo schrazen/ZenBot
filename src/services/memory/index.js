@@ -2,6 +2,7 @@ const ProfileManager = require('./profile');
 const FactStore = require('./factStore');
 const ProjectStore = require('./projectStore');
 const EpisodicMemory = require('./episodic');
+const PreferenceStore = require('./preferenceStore');
 const logger = require('../../utils/logger');
 
 class MemoryManager {
@@ -11,6 +12,7 @@ class MemoryManager {
         this.facts = new FactStore(config.paths.facts);
         this.projects = new ProjectStore(config.paths.projects);
         this.episodic = new EpisodicMemory(config.paths.memories);
+        this.preferences = new PreferenceStore(config.paths.preferences);
 
         // In-memory rolling short-term conversation cache: channelId -> [{role, content, ts}]
         this.shortTermHistory = new Map();
@@ -88,6 +90,12 @@ class MemoryManager {
         const factsContext = this.facts.toPromptContext(userQuery);
         if (factsContext) {
             systemPrompt += `\n\n[REMEMBERED FACTS]\n${factsContext}`;
+        }
+
+        // 6. Lance's Learned Preferences & Habits
+        const prefsContext = this.preferences.toPromptContext();
+        if (prefsContext) {
+            systemPrompt += `\n\n${prefsContext}`;
         }
 
         // 6. Active Study Session Context (if a review quiz is running in this channel)

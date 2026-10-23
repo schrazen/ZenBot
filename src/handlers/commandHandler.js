@@ -5,7 +5,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, reminderService, client }) {
+    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, reminderService, webSearchService, goalService, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -15,6 +15,8 @@ class CommandHandler {
         this.botProfileService = botProfileService;
         this.workspaceService = workspaceService;
         this.reminderService = reminderService;
+        this.webSearchService = webSearchService;
+        this.goalService = goalService;
         this.client = client;
     }
 
@@ -159,6 +161,27 @@ class CommandHandler {
             case 'delreminder':
             case 'cancelreminder':
                 return await this.cmdDeleteReminder(message, argText);
+            case 'goal':
+            case 'goals':
+            case 'task':
+            case 'job':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can assign autonomous goals.');
+                return await this.cmdGoal(message, args, argText);
+            case 'learn':
+            case 'rule':
+            case 'preference':
+            case 'preferences':
+            case 'rules':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can manage learned agent preferences.');
+                return await this.cmdPreferences(message, args, argText, cmd);
+            case 'delrule':
+            case 'delpref':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can delete learned preferences.');
+                return await this.cmdDeletePreference(message, argText);
+            case 'web':
+            case 'searchweb':
+            case 'ddg':
+                return await this.cmdWeb(message, argText);
             case 'readfile':
             case 'cat':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can inspect workspace files.');
@@ -249,6 +272,17 @@ class CommandHandler {
                     )
                 },
                 {
+                    name: 'Autonomous Agent & Goals (Lance Only)',
+                    value: (
+                        '`!goal <job description>` — Autonomous agent loop: plans, executes tools, self-corrects, and finishes\n' +
+                        '`!goal status` / `!goal pause` / `!goal resume` / `!goal cancel` — Monitor or control active goal\n' +
+                        '`!learn <rule>` — Teach ZenBot workflow rules & habits (e.g. `!learn Prefer TypeScript over JS`)\n' +
+                        '`!preferences` / `!rules` — View all learned user preferences & habits\n' +
+                        '`!delrule <id|index>` — Remove a learned preference rule\n' +
+                        '`!web <query>` — Zero-key DuckDuckGo web search'
+                    )
+                },
+                {
                     name: 'Reminders & Life Cadence',
                     value: (
                         '`!remind <time> to <task>` — Schedule a reminder (e.g. `!remind in 30m to check database`, `!remind tomorrow at 8am to submit form`)\n' +
@@ -269,7 +303,7 @@ class CommandHandler {
                         '`!roast <@user|name> [topic]` — Ruthlessly cook a target on Discord\n' +
                         '`!bot status <text>` / `!setbio <text>` — Update bot status or bio\n' +
                         '`!humor <0-5>` — Set humor intensity (0=serious, 2=natural, 5=degeneracy)\n' +
-                        '`!provider <groq|gemini>` / `!model <name>` — Switch AI engine\n' +
+                        '`!provider <groq|gemini|hermes>` / `!model <name>` — Switch AI engine\n' +
                         '`!remember <fact>` / `!forget <id>` — Permanent memories'
                     )
                 },
@@ -314,6 +348,7 @@ class CommandHandler {
                         `• Humor Intensity: **Level ${humorLvl}** (${humorLabel})\n` +
                         `• Tracked Projects: **${memStats.projectsCount}**\n` +
                         `• Remembered Facts: **${memStats.factsCount}**\n` +
+                        `• Learned Preferences: **${this.memoryManager.preferences ? this.memoryManager.preferences.listPreferences().length : 0}**\n` +
                         `• Stored Interactions: **${memStats.memoriesCount}**\n` +
                         `• Profile Updated: ${new Date(memStats.profileUpdated).toLocaleDateString()}`
                     ),
@@ -571,11 +606,31 @@ class CommandHandler {
     async cmdProvider(message, providerName) {
         if (!providerName) {
             const current = this.llmManager.currentProviderName;
-            return await message.reply(`Current provider is **${current}**. Switch using \`!provider groq\` or \`!provider gemini\`.`);
+            const available = Array.from(this.llmManager.providers.keys()).join(', ');
+            return await message.reply(`Current provider is **${current}**. Available: \`${available}\`.\nSwitch using \`!provider groq\`, \`!provider gemini\`, or \`!provider hermes\`.`);
+        }
+
+        const parts = providerName.trim().split(/\s+/);
+        const name = parts[0].toLowerCase();
+        const isForce = parts[1]?.toLowerCase() === 'force';
+
+        if (name === 'hermes' && !isForce) {
+            const hermes = this.llmManager.getProvider('hermes');
+            if (hermes) {
+                const health = await hermes.checkHealth();
+                if (!health.online) {
+                    return await message.reply(
+                        `⚠️ Hermes endpoint (\`${health.endpoint}\`) is currently offline or unreachable (${health.error || 'Connection refused'}).\n` +
+                        `To run local Hermes for 100% free unlimited RPM, run this in your terminal:\n` +
+                        `\`ollama run hermes3:8b\`\n` +
+                        `*(If you are starting it now and want to switch anyway, type \`!provider hermes force\`)*`
+                    );
+                }
+            }
         }
 
         try {
-            const switched = this.llmManager.setProvider(providerName);
+            const switched = this.llmManager.setProvider(name);
             const provider = this.llmManager.getCurrentProvider();
             return await message.reply(`Active provider switched to **${switched.toUpperCase()}** (Model: \`${provider.model}\`).`);
         } catch (err) {
@@ -1696,6 +1751,40 @@ class CommandHandler {
                 case 'clear':
                     return await this.cmdClear(adapter);
 
+                case 'goal': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can assign autonomous goals.');
+                    }
+                    const action = interaction.options.getString('action') || 'status';
+                    const prompt = interaction.options.getString('prompt') || '';
+                    if (action === 'start') {
+                        if (!prompt) return await adapter.reply('Please provide a prompt for the goal.');
+                        return await this.cmdGoal(adapter, [], prompt);
+                    }
+                    return await this.cmdGoal(adapter, [action], action);
+                }
+
+                case 'web': {
+                    await defer();
+                    const query = interaction.options.getString('query') || '';
+                    return await this.cmdWeb(adapter, query);
+                }
+
+                case 'learn': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can manage learned preferences.');
+                    }
+                    const rule = interaction.options.getString('rule') || '';
+                    return await this.cmdPreferences(adapter, [], rule, 'learn');
+                }
+
+                case 'preferences': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can view learned preferences.');
+                    }
+                    return await this.cmdPreferences(adapter, [], '', 'preferences');
+                }
+
                 case 'provider': {
                     if (!this.isOwner(adapter)) {
                         return await adapter.reply('Only Lance (bot owner) can switch active AI providers.');
@@ -2017,6 +2106,192 @@ class CommandHandler {
             }
         } catch (err) {
             return await message.reply(`✗ Command execution failed: ${err.message}`);
+        }
+    }
+
+    // ==========================================
+    // AUTONOMOUS AGENT & GOAL ORCHESTRATION
+    // ==========================================
+
+    async cmdGoal(message, args, argText) {
+        if (!this.goalService) {
+            return await message.reply('GoalService is not initialized.');
+        }
+
+        const sub = (args[0] || '').toLowerCase();
+
+        if (sub === 'pause') {
+            const res = await this.goalService.pauseGoal();
+            return await message.reply(res.message);
+        }
+
+        if (sub === 'resume') {
+            const res = await this.goalService.resumeGoal();
+            return await message.reply(res.message);
+        }
+
+        if (sub === 'cancel' || sub === 'stop') {
+            const res = await this.goalService.cancelGoal();
+            return await message.reply(res.message);
+        }
+
+        if (sub === 'status' || !argText) {
+            if (this.goalService.hasActiveGoal()) {
+                const goal = this.goalService.getActiveGoal();
+                const embed = this.goalService._renderProgressEmbed(goal);
+                return await message.reply({ embeds: [embed] });
+            }
+
+            const history = this.goalService.goalsHistory || [];
+            const embed = new EmbedBuilder()
+                .setTitle('🎯 Autonomous Goals Manager')
+                .setColor(0x3a86ff)
+                .setDescription(
+                    history.length === 0
+                        ? 'No active or past goals found. Start an autonomous agent job with:\n`!goal <job description>`'
+                        : `**Recent Goals:**\n` + history.slice(0, 5).map((g, i) => {
+                            const icon = g.status === 'completed' ? '✅' : (g.status === 'failed' ? '❌' : '⏸️');
+                            const time = new Date(g.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                            return `${icon} **[${time}]** ${g.prompt.slice(0, 70)} (${g.plan?.length || 0} steps)`;
+                        }).join('\n')
+                )
+                .addFields(
+                    {
+                        name: 'Commands',
+                        value: (
+                            '`!goal <prompt>` — Launch autonomous agent to accomplish a task\n' +
+                            '`!goal status` — Inspect current progress & step details\n' +
+                            '`!goal pause` / `!goal resume` — Temporarily halt or resume\n' +
+                            '`!goal cancel` — Stop and discard active job'
+                        )
+                    }
+                )
+                .setFooter({ text: 'ZenBot Autonomous Agent' })
+                .setTimestamp();
+
+            return await message.reply({ embeds: [embed] });
+        }
+
+        if (sub === 'history' || sub === 'list') {
+            const history = this.goalService.goalsHistory || [];
+            if (!history.length) {
+                return await message.reply('No past goals in history.');
+            }
+            const list = history.slice(0, 10).map((g, i) => {
+                const icon = g.status === 'completed' ? '✅' : (g.status === 'failed' ? '❌' : '⏸️');
+                const date = new Date(g.startTime).toLocaleDateString();
+                return `**${i + 1}.** ${icon} [${date}] "${g.prompt.slice(0, 60)}" - *${g.status.toUpperCase()}*`;
+            }).join('\n');
+            return await message.reply(`📋 **Goal History:**\n${list}`);
+        }
+
+        // Start new goal
+        const goalPrompt = argText.trim();
+        try {
+            await this.goalService.startGoal({
+                prompt: goalPrompt,
+                userId: message.author.id,
+                channelId: message.channel.id,
+                discordMessage: message
+            });
+        } catch (err) {
+            return await message.reply(`⚠️ Could not launch goal: ${err.message}`);
+        }
+    }
+
+    // ==========================================
+    // LEARNED PREFERENCES & HABITS
+    // ==========================================
+
+    async cmdPreferences(message, args, argText, cmd) {
+        if (!this.memoryManager.preferences) {
+            return await message.reply('PreferenceStore is not initialized.');
+        }
+
+        if (cmd === 'learn' || cmd === 'rule' || args[0]?.toLowerCase() === 'add') {
+            const ruleText = (cmd === 'learn' || cmd === 'rule') ? argText : args.slice(1).join(' ').trim();
+            if (!ruleText) {
+                return await message.reply('Usage: `!learn <rule or habit>` (e.g. `!learn Always run npm test before committing`)');
+            }
+            const pref = this.memoryManager.preferences.addPreference(ruleText, 'workflow', 'manual');
+            if (pref) {
+                return await message.reply(`✓ Learned new preference rule:\n> "${pref.rule}"\n*(ID: \`${pref.id}\` • Category: \`${pref.category}\`)*`);
+            } else {
+                return await message.reply('Rule could not be saved (minimum 5 characters required).');
+            }
+        }
+
+        const prefs = this.memoryManager.preferences.listPreferences();
+        if (!prefs.length) {
+            return await message.reply('No learned preferences yet. Teach me with `!learn <rule>` (e.g. `!learn Prefer TypeScript over JavaScript`)');
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🧠 Learned Agent Preferences (${prefs.length} Rules)`)
+            .setColor(0x7209b7)
+            .setDescription(
+                prefs.map((p, i) => `**${i + 1}.** [${p.category.toUpperCase()}] "${p.rule}"\n└ ID: \`${p.id}\` • Source: \`${p.source}\``).join('\n\n')
+            )
+            .setFooter({ text: 'Use !learn <rule> to add or !delrule <id|index> to remove' })
+            .setTimestamp();
+
+        return await message.reply({ embeds: [embed] });
+    }
+
+    async cmdDeletePreference(message, argText) {
+        if (!this.memoryManager.preferences) {
+            return await message.reply('PreferenceStore is not initialized.');
+        }
+        if (!argText || !argText.trim()) {
+            return await message.reply('Usage: `!delrule <id|index>` (e.g. `!delrule 1` or `!delrule pref_12345`)');
+        }
+
+        const res = this.memoryManager.preferences.deletePreference(argText.trim());
+        if (res.success) {
+            return await message.reply(`✓ Deleted preference rule:\n> "${res.removed.rule}"`);
+        } else {
+            return await message.reply(`✗ ${res.message}`);
+        }
+    }
+
+    // ==========================================
+    // WEB SEARCH (ZERO-KEY DUCKDUCKGO)
+    // ==========================================
+
+    async cmdWeb(message, argText) {
+        if (!this.webSearchService) {
+            return await message.reply('WebSearchService is not initialized.');
+        }
+        if (!argText || !argText.trim()) {
+            return await message.reply('Usage: `!web <search query>` (e.g. `!web latest nodejs 22 features`)');
+        }
+
+        try {
+            await message.channel.sendTyping();
+        } catch (e) {}
+
+        try {
+            const searchRes = await this.webSearchService.search(argText.trim(), 5);
+            const results = searchRes.results || [];
+            if (!results || results.length === 0) {
+                return await message.reply(`No web results found for "${argText}".`);
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`🔍 Web Search: ${argText.slice(0, 100)}`)
+                .setColor(0x2a9d8f)
+                .setTimestamp();
+
+            const fields = results.slice(0, 5).map(r => ({
+                name: r.title.slice(0, 250),
+                value: `[Open Page](${r.url})\n${(r.snippet || 'No preview available').slice(0, 300)}`
+            }));
+            embed.addFields(fields);
+            embed.setFooter({ text: 'DuckDuckGo Web Search • ZenBot' });
+
+            return await message.reply({ embeds: [embed] });
+        } catch (err) {
+            return await message.reply(`✗ Web search failed: ${err.message}`);
         }
     }
 }

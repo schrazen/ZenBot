@@ -110,9 +110,17 @@ const config = {
         gemini: {
             apiKey: process.env.GEMINI_API_KEY || '',
             model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
-            fallbackModel: 'gemini-2.5-flash',
+            fallbackModel: 'gemini-flash-latest',
             maxTokens: parseInt(process.env.GEMINI_MAX_TOKENS || '500', 10),
             temperature: parseFloat(process.env.GEMINI_TEMPERATURE || '0.7')
+        },
+        hermes: {
+            url: process.env.HERMES_URL || process.env.LOCAL_LLM_URL || 'http://localhost:11434/v1',
+            model: process.env.HERMES_MODEL || 'hermes3:8b',
+            fallbackModel: 'hermes3:latest',
+            apiKey: process.env.HERMES_API_KEY || 'ollama',
+            maxTokens: 1500,
+            temperature: 0.7
         }
     },
 
@@ -124,7 +132,9 @@ const config = {
         facts: path.join(rootDir, 'data', 'facts.json'),
         projects: path.join(rootDir, 'data', 'projects.json'),
         memories: path.join(rootDir, 'data', 'memories.json'),
-        reminders: path.join(rootDir, 'data', 'reminders.json')
+        reminders: path.join(rootDir, 'data', 'reminders.json'),
+        preferences: path.join(rootDir, 'data', 'preferences.json'),
+        goals: path.join(rootDir, 'data', 'goals.json')
     },
 
     // Autonomy & Tool Execution

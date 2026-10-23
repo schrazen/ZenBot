@@ -2,7 +2,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, reminderService }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, reminderService, webSearchService, goalService }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -13,6 +13,8 @@ class MessageHandler {
         this.studyService = studyService;
         this.workspaceService = workspaceService;
         this.reminderService = reminderService;
+        this.webSearchService = webSearchService;
+        this.goalService = goalService;
         this.processedMessageIds = new Set();
         this.showTokens = false;
     }
@@ -334,8 +336,14 @@ class MessageHandler {
             }
         }
 
-        // Only allow owner to inject persistent inline memories
+        // Only allow owner to inject persistent inline memories & learn feedback rules
         const rememberedInline = isOwner ? this.checkInlineMemory(effectiveQuery) : null;
+        const learnedPref = (isOwner && this.memoryManager.preferences)
+            ? this.memoryManager.preferences.detectFeedbackRule(effectiveQuery)
+            : null;
+        if (learnedPref) {
+            this.memoryManager.preferences.addPreference(learnedPref.rule, learnedPref.category, 'feedback');
+        }
 
         // Combine referenced message context and user query
         let fullUserText = effectiveQuery;
@@ -404,6 +412,7 @@ class MessageHandler {
                     executeTool: (name, args) => executeTool(name, args, {
                         workspaceService: this.workspaceService,
                         reminderService: this.reminderService,
+                        webSearchService: this.webSearchService,
                         userId: message.author.id,
                         channelId: message.channel.id,
                         isDM
@@ -418,6 +427,10 @@ class MessageHandler {
             if (response.executedTools && response.executedTools.length > 0) {
                 const toolNames = response.executedTools.map(t => `\`${t.name}\``).join(', ');
                 replyText = `*(🛠️ Executed: ${toolNames})*\n\n` + replyText;
+            }
+
+            if (learnedPref) {
+                replyText = `*(💡 Learned preference: "${learnedPref.rule}")*\n\n` + replyText;
             }
 
             if (rememberedInline) {

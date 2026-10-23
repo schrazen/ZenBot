@@ -102,6 +102,42 @@ const toolSpecs = [
         }
     },
     {
+        name: 'web_search',
+        description: 'Search the live web for current real-time information, documentation, news, or technical questions using DuckDuckGo.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    description: 'The search query or research topic.'
+                },
+                maxResults: {
+                    type: 'integer',
+                    description: 'Maximum search results to return (default: 5).'
+                }
+            },
+            required: ['query']
+        }
+    },
+    {
+        name: 'fetch_web_page',
+        description: 'Fetch and read the full text/markdown content of a web page by its URL. Useful for reading documentation, articles, or GitHub pages.',
+        parameters: {
+            type: 'object',
+            properties: {
+                url: {
+                    type: 'string',
+                    description: 'The full HTTP/HTTPS URL of the web page to read.'
+                },
+                maxChars: {
+                    type: 'integer',
+                    description: 'Maximum characters of text to extract (default: 4000).'
+                }
+            },
+            required: ['url']
+        }
+    },
+    {
         name: 'run_command',
         description: 'Execute a shell terminal command in the project directory (e.g. "git status", "git diff", "node -v", "npm test"). Restricted to safe workspace operations.',
         parameters: {
@@ -205,7 +241,7 @@ function getGeminiTools() {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { workspaceService, reminderService, userId, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, userId, channelId, isDM = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -218,6 +254,16 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, u
 
     try {
         switch (name) {
+            case 'web_search': {
+                if (!webSearchService) return { error: 'WebSearchService is not available.' };
+                return await webSearchService.search(args.query, args.maxResults);
+            }
+
+            case 'fetch_web_page': {
+                if (!webSearchService) return { error: 'WebSearchService is not available.' };
+                return await webSearchService.fetchPage(args.url, args.maxChars);
+            }
+
             case 'read_file': {
                 if (!workspaceService) return { error: 'WorkspaceService is not available.' };
                 return await workspaceService.readFile(args.filePath, args.maxLines, args.offset);
@@ -303,3 +349,4 @@ module.exports = {
     getGeminiTools,
     executeTool
 };
+

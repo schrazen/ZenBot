@@ -378,3 +378,4 @@ class ReminderService {
 }
 
 module.exports = ReminderService;
+

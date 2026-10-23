@@ -10,6 +10,8 @@ const StudyService = require('./services/studyService');
 const BotProfileService = require('./services/botProfileService');
 const WorkspaceService = require('./services/workspaceService');
 const ReminderService = require('./services/reminderService');
+const WebSearchService = require('./services/webSearchService');
+const GoalService = require('./services/goalService');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -53,6 +55,16 @@ class ZenBot {
             config: this.config,
             storagePath: this.config.paths.reminders
         });
+        this.webSearchService = new WebSearchService();
+        this.goalService = new GoalService({
+            config: this.config,
+            llmManager: this.llmManager,
+            workspaceService: this.workspaceService,
+            webSearchService: this.webSearchService,
+            reminderService: this.reminderService,
+            memoryManager: this.memoryManager,
+            client: this.client
+        });
 
         this.commandHandler = new CommandHandler({
             config: this.config,
@@ -64,6 +76,8 @@ class ZenBot {
             botProfileService: this.botProfileService,
             workspaceService: this.workspaceService,
             reminderService: this.reminderService,
+            webSearchService: this.webSearchService,
+            goalService: this.goalService,
             client: this.client
         });
 
@@ -77,6 +91,8 @@ class ZenBot {
             studyService: this.studyService,
             workspaceService: this.workspaceService,
             reminderService: this.reminderService,
+            webSearchService: this.webSearchService,
+            goalService: this.goalService,
             client: this.client
         });
 
