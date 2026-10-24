@@ -88,7 +88,9 @@ class HermesProvider {
                 throw new Error(`Hermes API error (${endpoint}): ${errMessage}`);
             }
 
-            const rawMsg = data.choices?.[0]?.message;
+            const choice = data.choices?.[0];
+            const rawMsg = choice?.message;
+            const finishReason = choice?.finish_reason || 'stop';
             const reply = rawMsg?.content;
             const toolCalls = rawMsg?.tool_calls || null;
 
@@ -101,6 +103,7 @@ class HermesProvider {
             return {
                 content: (reply || '').trim(),
                 toolCalls,
+                finishReason: finishReason === 'length' ? 'length' : 'stop',
                 rawMessage: rawMsg,
                 provider: 'hermes',
                 model: modelToUse,

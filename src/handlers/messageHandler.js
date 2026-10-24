@@ -464,12 +464,81 @@ class MessageHandler {
                 await message.reply(chunk);
             }
 
+            // Smart Auto-Continuation: If the model cut off mid-sentence or hit max_tokens,
+            // automatically continue in a follow-up message (and execute any pending tools).
+            let fullAccumulatedReply = response.content || '';
+            let currentResponse = response;
+            let continuationCount = 0;
+            const maxContinuations = 2;
+
+            while (
+                continuationCount < maxContinuations &&
+                this.llmManager.isResponseIncomplete(currentResponse.content, currentResponse.finishReason)
+            ) {
+                continuationCount++;
+                logger.info(`[Auto-Continue #${continuationCount}] Detected incomplete response (finishReason=${currentResponse.finishReason}). Generating continuation...`);
+
+                try {
+                    await message.channel.sendTyping();
+                } catch (e) {}
+
+                const continuationMessages = [
+                    ...messages,
+                    { role: 'assistant', content: fullAccumulatedReply },
+                    {
+                        role: 'user',
+                        content: '[SYSTEM AUTO-CONTINUE]: Your previous message was cut off before you finished. Continue seamlessly right from where you stopped without repeating what you already said. If you were about to run a tool (like `schedule_automation`, `run_command`, `write_file`, etc.), execute it now and finish your explanation.'
+                    }
+                ];
+
+                let nextResponse;
+                if (isOwner && autonomyEnabled && (this.workspaceService || this.reminderService)) {
+                    const { getGroqTools, getGeminiTools, executeTool } = require('../services/llm/toolDefinitions');
+                    nextResponse = await this.llmManager.chatWithAgent(continuationMessages, {
+                        tools: getGroqTools(),
+                        geminiTools: getGeminiTools(),
+                        executeTool: (name, args) => executeTool(name, args, {
+                            workspaceService: this.workspaceService,
+                            reminderService: this.reminderService,
+                            webSearchService: this.webSearchService,
+                            automationService: this.automationService,
+                            userId: message.author.id,
+                            channelId: message.channel.id,
+                            isDM
+                        }),
+                        maxSteps: 5
+                    });
+                } else {
+                    nextResponse = await this.llmManager.chat(continuationMessages);
+                }
+
+                if (!nextResponse || (!nextResponse.content?.trim() && (!nextResponse.executedTools || nextResponse.executedTools.length === 0))) {
+                    break;
+                }
+
+                let contText = nextResponse.content || '';
+                if (nextResponse.executedTools && nextResponse.executedTools.length > 0) {
+                    const toolNames = nextResponse.executedTools.map(t => `\`${t.name}\``).join(', ');
+                    contText = `*(🛠️ Executed: ${toolNames})*\n\n` + contText;
+                }
+
+                if (contText.trim()) {
+                    const contChunks = splitMessage(contText, 1950);
+                    for (const c of contChunks) {
+                        await message.channel.send(c);
+                    }
+                    fullAccumulatedReply += '\n' + (nextResponse.content || '');
+                }
+
+                currentResponse = nextResponse;
+            }
+
             // Persist turns to memory
             const historyUserTurn = isOwner ? userQuery : `${speakerName}: ${userQuery}`;
             this.memoryManager.recordTurn(message.channel.id, 'user', historyUserTurn);
-            this.memoryManager.recordTurn(message.channel.id, 'assistant', response.content);
+            this.memoryManager.recordTurn(message.channel.id, 'assistant', fullAccumulatedReply);
 
-            logger.success(`Replied via ${response.provider} (${response.model}) in ${response.latencyMs}ms`);
+            logger.success(`Replied via ${response.provider} (${response.model}) in ${response.latencyMs}ms${continuationCount > 0 ? ` (+${continuationCount} auto-continuation)` : ''}`);
         } catch (error) {
             logger.error(`Failed to generate response: ${error.message}`);
             await message.reply(`Error: ${error.message}`);

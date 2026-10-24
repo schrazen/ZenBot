@@ -29,6 +29,11 @@ class GroqProvider {
             temperature: options.temperature ?? this.temperature
         };
 
+        // Keep internal reasoning compact on gpt-oss models so it never starves visible output tokens
+        if (modelToUse.includes('gpt-oss')) {
+            payload.reasoning_effort = options.reasoningEffort || 'low';
+        }
+
         if (options.tools && Array.isArray(options.tools)) {
             payload.tools = options.tools;
             payload.tool_choice = options.tool_choice || 'auto';
@@ -59,11 +64,22 @@ class GroqProvider {
                 throw new Error(`Groq API error: ${errMessage}`);
             }
 
-            const rawMsg = data.choices?.[0]?.message;
+            const choice = data.choices?.[0];
+            const rawMsg = choice?.message;
+            const finishReason = choice?.finish_reason || 'stop';
             const reply = rawMsg?.content;
             const toolCalls = rawMsg?.tool_calls || null;
 
             if (!reply && (!toolCalls || toolCalls.length === 0)) {
+                if (finishReason === 'length' && !options._retriedEmpty) {
+                    logger.warn(`Groq model ${modelToUse} exhausted max_tokens (${maxTokensToUse}) during reasoning. Retrying with expanded token budget...`);
+                    return await this.chat(messages, {
+                        ...options,
+                        maxTokens: Math.min(maxTokensToUse * 2, 2048),
+                        reasoningEffort: 'low',
+                        _retriedEmpty: true
+                    });
+                }
                 throw new Error('Groq returned empty response content.');
             }
 
@@ -82,6 +98,7 @@ class GroqProvider {
             return {
                 content: (reply || '').trim(),
                 toolCalls,
+                finishReason: finishReason === 'length' ? 'length' : 'stop',
                 rawMessage: rawMsg,
                 provider: 'groq',
                 model: modelToUse,

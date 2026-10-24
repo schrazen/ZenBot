@@ -130,6 +130,47 @@ class LLMManager {
     }
 
     /**
+     * Detects whether an LLM response was cut off mid-thought or hit token limits.
+     * Checks both API finishReason ('length' / 'MAX_TOKENS') and syntactic cutoff patterns.
+     */
+    isResponseIncomplete(content, finishReason) {
+        if (finishReason === 'length' || finishReason === 'MAX_TOKENS') {
+            return true;
+        }
+        if (!content || !content.trim()) {
+            return false;
+        }
+
+        const trimmed = content.trim();
+
+        // 1. Unclosed markdown code fence (odd number of ```)
+        const fenceCount = (trimmed.match(/```/g) || []).length;
+        if (fenceCount % 2 !== 0) {
+            return true;
+        }
+
+        // 2. Unclosed inline backtick on the final line
+        const lines = trimmed.split('\n');
+        const lastLine = lines[lines.length - 1] || '';
+        const inlineBackticks = (lastLine.replace(/```/g, '').match(/`/g) || []).length;
+        if (inlineBackticks % 2 !== 0) {
+            return true;
+        }
+
+        // 3. Ends with dangling punctuation or an empty list item marker
+        if (/[:,;\-—\(\[]$/.test(trimmed) || /(?:^|\n)\s*(?:\d+\.|[-*•])\s*$/.test(trimmed)) {
+            return true;
+        }
+
+        // 4. Ends with a dangling preposition, auxiliary verb, article, conjunction, or pronoun
+        if (/\b(?:is|are|was|were|will|would|can|could|should|shall|may|might|must|have|has|had|the|a|an|to|for|of|in|on|at|by|with|from|against|into|onto|upon|between|among|through|during|before|after|above|below|under|over|and|or|but|nor|so|yet|because|although|though|since|unless|until|while|where|whether|that|which|who|whom|whose|this|these|those|my|your|his|her|its|our|their)$/i.test(trimmed)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * Executes a chat completion with automatic failover.
      */
     async chat(messages, options = {}) {

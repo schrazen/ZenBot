@@ -50,8 +50,8 @@ class EpisodicMemory {
         if (!content || !content.trim()) return null;
 
         const cleanContent = content.trim();
-        const storedContent = (role === 'assistant' && cleanContent.length > 250)
-            ? cleanContent.slice(0, 250) + '...'
+        const storedContent = (role === 'assistant' && cleanContent.length > 800)
+            ? cleanContent.slice(0, 800) + '...'
             : cleanContent;
 
         const entry = {

@@ -5,7 +5,7 @@ class GeminiProvider {
         this.apiKey = config.apiKey;
         this.model = config.model || 'gemini-3.5-flash-lite';
         this.fallbackModel = config.fallbackModel || 'gemini-3.8-flash';
-        this.maxTokens = config.maxTokens || 500;
+        this.maxTokens = config.maxTokens || 1500;
         this.temperature = config.temperature ?? 0.7;
         this.name = 'gemini';
     }
@@ -23,12 +23,23 @@ class GeminiProvider {
 
         for (const msg of messages) {
             if (msg.role === 'system') {
-                systemParts.push({ text: msg.content });
-            } else {
+                if (msg.content) systemParts.push({ text: msg.content });
+            } else if (msg.role === 'tool') {
                 contents.push({
-                    role: msg.role === 'assistant' ? 'model' : 'user',
-                    parts: [{ text: msg.content }]
+                    role: 'user',
+                    parts: [{ text: `[Tool Output]: ${msg.content || '(empty)'}` }]
                 });
+            } else {
+                let text = msg.content || '';
+                if (!text && msg.tool_calls && msg.tool_calls.length > 0) {
+                    text = msg.tool_calls.map(tc => `[Called tool ${tc.function?.name}(${tc.function?.arguments || ''})]`).join('\n');
+                }
+                if (text.trim()) {
+                    contents.push({
+                        role: msg.role === 'assistant' ? 'model' : 'user',
+                        parts: [{ text }]
+                    });
+                }
             }
         }
 
@@ -69,7 +80,7 @@ class GeminiProvider {
             contents,
             generationConfig: {
                 temperature: options.temperature ?? this.temperature,
-                maxOutputTokens: Math.min(maxTokensToUse, 500)
+                maxOutputTokens: maxTokensToUse
             }
         };
 
@@ -134,12 +145,14 @@ class GeminiProvider {
                 throw new Error('Gemini returned an empty response.');
             }
 
+            const rawFinish = candidate?.finishReason || 'STOP';
             const latencyMs = Date.now() - startTime;
             this.lastUsage = data.usageMetadata || null;
 
             return {
                 content: textPart.trim(),
                 toolCalls: toolCalls.length > 0 ? toolCalls : null,
+                finishReason: (rawFinish === 'MAX_TOKENS' || rawFinish === 'length') ? 'length' : 'stop',
                 provider: 'gemini',
                 model: modelToUse,
                 latencyMs,

@@ -71,6 +71,17 @@ class MemoryManager {
         });
         systemPrompt += `\n\n[TEMPORAL CONTEXT]\nCurrent Time: ${timeStr}`;
 
+        // 2b. Autonomous Agent Self-Awareness & Environment Context (Owner Only)
+        if (isOwner) {
+            systemPrompt += (
+                `\n\n[AUTONOMOUS AGENT CAPABILITIES & SELF-AWARENESS]\n` +
+                `- You are speaking with your owner and creator, Lance.\n` +
+                `- Your live codebase and workspace directory is \`d:\\xamp awawawa\\htdocs\\zen\`. You HAVE full tool access (\`list_files\`, \`read_file\`, \`write_file\`, \`edit_file\`, \`run_command\`, \`web_search\`, \`schedule_automation\`, \`list_automations\`, \`delete_automation\`) to inspect and modify your own code, run shell commands, search the web, and schedule recurring background watchers/automations.\n` +
+                `- Connected Discord Servers: \`col\` (ID: 873791689939107861), \`rodericks\` (ID: 1422544961597083712), and \`BANORANTTT\` (ID: 1484106877708013608).\n` +
+                `- Never claim you cannot access your own files or Discord servers — use your tools directly when Lance asks you to build, check, or automate something.`
+            );
+        }
+
         // 3. User Profile: Only inject in private DMs or if explicitly asked about Lance's profile/career
         const wantsProfile = isDM || /\b(profile|bio|who is lance|lance'?s background|skills|career)\b/i.test(userQuery);
         if (wantsProfile) {
@@ -116,7 +127,7 @@ class MemoryManager {
         if (retrievedMemories.length > 0) {
             const memorySnippets = retrievedMemories
                 .map((m, i) => {
-                    const excerpt = m.content.length > 180 ? m.content.slice(0, 180) + '...' : m.content;
+                    const excerpt = m.content.length > 350 ? m.content.slice(0, 350) + '...' : m.content;
                     return `- [${new Date(m.ts).toLocaleDateString()}] ${m.role.toUpperCase()}: ${excerpt}`;
                 })
                 .join('\n');
