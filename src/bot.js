@@ -14,6 +14,7 @@ const WebSearchService = require('./services/webSearchService');
 const GoalService = require('./services/goalService');
 const AutomationService = require('./services/automationService');
 const MessageQueueService = require('./services/messageQueueService');
+const SelfUpgradeService = require('./services/selfUpgradeService');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -53,6 +54,11 @@ class ZenBot {
         this.workspaceService = new WorkspaceService({
             rootDir: this.config.paths.root
         });
+        this.selfUpgradeService = new SelfUpgradeService({
+            config: this.config,
+            workspaceService: this.workspaceService,
+            client: this.client
+        });
         this.reminderService = new ReminderService({
             config: this.config,
             storagePath: this.config.paths.reminders
@@ -73,6 +79,8 @@ class ZenBot {
             webSearchService: this.webSearchService,
             workspaceService: this.workspaceService,
             memoryManager: this.memoryManager,
+            selfUpgradeService: this.selfUpgradeService,
+            channelHistory: this.channelHistory,
             client: this.client,
             storagePath: this.config.paths.automations
         });
@@ -87,6 +95,7 @@ class ZenBot {
             studyService: this.studyService,
             botProfileService: this.botProfileService,
             workspaceService: this.workspaceService,
+            selfUpgradeService: this.selfUpgradeService,
             reminderService: this.reminderService,
             webSearchService: this.webSearchService,
             goalService: this.goalService,
@@ -103,6 +112,7 @@ class ZenBot {
             ownerAvailability: this.ownerAvailability,
             studyService: this.studyService,
             workspaceService: this.workspaceService,
+            selfUpgradeService: this.selfUpgradeService,
             reminderService: this.reminderService,
             webSearchService: this.webSearchService,
             goalService: this.goalService,

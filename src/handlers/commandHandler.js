@@ -5,7 +5,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, reminderService, webSearchService, goalService, automationService, client }) {
+    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, selfUpgradeService, reminderService, webSearchService, goalService, automationService, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -14,6 +14,7 @@ class CommandHandler {
         this.studyService = studyService;
         this.botProfileService = botProfileService;
         this.workspaceService = workspaceService;
+        this.selfUpgradeService = selfUpgradeService;
         this.reminderService = reminderService;
         this.webSearchService = webSearchService;
         this.goalService = goalService;
@@ -198,6 +199,17 @@ class CommandHandler {
             case 'runauto':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can run automations.');
                 return await this.cmdTriggerAutomation(message, argText);
+            case 'approve':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can approve self-upgrades.');
+                return await this.cmdApproveUpgrade(message, argText);
+            case 'reject':
+            case 'deny':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can reject self-upgrades.');
+                return await this.cmdRejectUpgrade(message, argText);
+            case 'upgrades':
+            case 'pending':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can view pending self-upgrades.');
+                return await this.cmdListUpgrades(message);
             case 'web':
             case 'searchweb':
             case 'ddg':
@@ -2498,6 +2510,54 @@ class CommandHandler {
         } catch (err) {
             return await message.reply(`✗ Failed to execute automation: ${err.message}`);
         }
+    }
+
+    // ==========================================
+    // SELF-UPGRADE PERMISSION GATE COMMANDS
+    // ==========================================
+
+    async cmdListUpgrades(message) {
+        if (!this.selfUpgradeService) return await message.reply('SelfUpgradeService is not initialized.');
+        const pending = this.selfUpgradeService.getPendingProposals();
+        if (pending.length === 0) {
+            return await message.reply('No pending self-upgrade proposals right now.');
+        }
+        const embed = this.selfUpgradeService.buildProposalEmbed(pending);
+        return await message.reply({ embeds: [embed] });
+    }
+
+    async cmdApproveUpgrade(message, argText) {
+        if (!this.selfUpgradeService) return await message.reply('SelfUpgradeService is not initialized.');
+        const res = await this.selfUpgradeService.approve(argText?.trim() || null);
+        if (!res.success && (!res.failed || res.failed.length === 0)) {
+            return await message.reply(`⚠️ ${res.message}`);
+        }
+
+        const lines = [];
+        if (res.applied?.length > 0) {
+            lines.push(`✅ **Approved & Applied (${res.applied.length}):**`);
+            for (const p of res.applied) {
+                lines.push(`• \`${p.filePath}\` (\`${p.id}\`) — *${p.reason}* (Syntax verified ✓)`);
+            }
+        }
+        if (res.failed?.length > 0) {
+            lines.push(`\n❌ **Failed & Auto-Rolled Back (${res.failed.length}):**`);
+            for (const f of res.failed) {
+                lines.push(`• \`${f.filePath}\` (\`${f.id}\`): ${f.error}`);
+            }
+        }
+
+        return await message.reply(lines.join('\n'));
+    }
+
+    async cmdRejectUpgrade(message, argText) {
+        if (!this.selfUpgradeService) return await message.reply('SelfUpgradeService is not initialized.');
+        const res = this.selfUpgradeService.reject(argText?.trim() || null);
+        if (!res.success) {
+            return await message.reply(`⚠️ ${res.message}`);
+        }
+        const names = res.rejected.map(p => `\`${p.filePath}\` (\`${p.id}\`)`).join(', ');
+        return await message.reply(`🛑 Rejected and discarded pending self-upgrade proposal(s): ${names}`);
     }
 }
 

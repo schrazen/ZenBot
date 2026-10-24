@@ -25,11 +25,21 @@ class ChannelHistoryService {
 
         const text = query.toLowerCase();
 
-        // 1. Explicit channel mention: <#123456789...>
-        const mentionMatch = text.match(/<#(\d+)>/);
+        // 1. Explicit channel mention: <#123456789...> or raw 17-20 digit ID
+        const mentionMatch = text.match(/<#(\d+)>/) || text.match(/\b(\d{17,20})\b/);
         if (mentionMatch) {
-            const ch = this.client.channels.cache.get(mentionMatch[1]);
+            const rawId = mentionMatch[1];
+            const ch = this.client.channels.cache.get(rawId);
             if (ch && ch.isTextBased()) return ch;
+
+            // Check if the ID is a Guild (Server) ID
+            const guild = this.client.guilds.cache.get(rawId);
+            if (guild) {
+                const general = guild.channels.cache.find(c => c.isTextBased() && !c.isVoiceBased() && c.name.toLowerCase().includes('general'));
+                if (general) return general;
+                const firstText = guild.channels.cache.find(c => c.isTextBased() && !c.isVoiceBased());
+                if (firstText) return firstText;
+            }
         }
 
         // 2. Check if a connected server name is mentioned in the query

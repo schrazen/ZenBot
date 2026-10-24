@@ -4,12 +4,14 @@ const { EmbedBuilder } = require('discord.js');
 const logger = require('../utils/logger');
 
 class AutomationService {
-    constructor({ config, llmManager, webSearchService, workspaceService, memoryManager, client, storagePath }) {
+    constructor({ config, llmManager, webSearchService, workspaceService, memoryManager, selfUpgradeService, channelHistory, client, storagePath }) {
         this.config = config;
         this.llmManager = llmManager;
         this.webSearchService = webSearchService;
         this.workspaceService = workspaceService;
         this.memoryManager = memoryManager;
+        this.selfUpgradeService = selfUpgradeService;
+        this.channelHistory = channelHistory;
         this.client = client;
 
         this.storagePath = storagePath || (config?.paths?.automations
@@ -247,13 +249,13 @@ class AutomationService {
             return;
         }
 
-        // 2. Web Watcher (Check a URL for price drops, keywords, updates)
-        if (auto.actionType === 'web_watch' || auto.url || auto.prompt.toLowerCase().includes('check http')) {
+        // 2. Web Watcher (Check a URL for weather, price drops, keywords, updates)
+        if (auto.actionType === 'web_watch' || auto.url || /https?:\/\/[^\s]+/i.test(auto.prompt || '')) {
             await this._runWebWatcher(auto);
             return;
         }
 
-        // 3. Autonomous Task / Periodic Monitor
+        // 3. Autonomous Task / Periodic Monitor (with full Agent Tools)
         await this._runAgentTask(auto);
     }
 
@@ -300,12 +302,17 @@ class AutomationService {
         let targetUrl = auto.url;
         if (!targetUrl) {
             const urlMatch = auto.prompt.match(/https?:\/\/[^\s]+/i);
-            if (urlMatch) targetUrl = urlMatch[0];
+            if (urlMatch) {
+                targetUrl = urlMatch[0].replace(/[.,;)'"]+$/, '');
+            }
         }
 
         if (!targetUrl) throw new Error('No URL specified for web watcher.');
 
-        const pageContent = await this.webSearchService.fetchPage(targetUrl, 4000);
+        const pageRes = await this.webSearchService.fetchPage(targetUrl, 4000);
+        const pageText = typeof pageRes === 'string'
+            ? pageRes
+            : (pageRes.content || pageRes.error || JSON.stringify(pageRes));
         
         // Use fast specialist model (gpt-oss-20b or gemini) to evaluate watcher condition
         const specialist = this.llmManager.getSpecialist('subtask');
@@ -313,29 +320,31 @@ class AutomationService {
             {
                 role: 'system',
                 content: (
-                    'You are an autonomous Hermes background watcher agent. Your job is to analyze webpage content against a user surveillance condition.\n' +
-                    'Determine if the condition is met, and whether an alert should be dispatched to Lance.\n' +
+                    'You are an autonomous Hermes background watcher agent. Your job is to analyze live fetched webpage/API content against a user surveillance condition.\n' +
+                    'Determine if the condition is met right now, and whether an alert should be dispatched to Lance.\n' +
+                    'IMPORTANT: If the user only wants to be notified WHEN a specific condition happens (e.g. if rain is forecasted, if price drops), set "shouldAlert": false when the condition is NOT met so you do not spam him.\n' +
                     'Return valid JSON only in this schema:\n' +
-                    '{\n  "shouldAlert": boolean,\n  "summary": string (concise explanation of what changed or what was found)\n}'
+                    '{\n  "shouldAlert": boolean,\n  "summary": string (concise explanation of what was found)\n}'
                 )
             },
             {
                 role: 'user',
-                content: `Target URL: ${targetUrl}\nWatcher Goal: ${auto.prompt}\n\nWebpage Content Snippet:\n"""\n${pageContent.slice(0, 3000)}\n"""`
+                content: `Target URL: ${targetUrl}\nWatcher Goal: ${auto.prompt}\n\nFetched Live Content:\n"""\n${pageText.slice(0, 3000)}\n"""`
             }
         ];
 
-        const res = await specialist.provider.chat(evalPrompt, { model: specialist.model, temperature: 0.2 });
-        let decision = { shouldAlert: true, summary: 'Watcher executed.' };
+        const res = await this.llmManager.chat(evalPrompt, { model: specialist.model, temperature: 0.2 });
+        let decision = { shouldAlert: false, summary: 'Watcher executed.' };
         try {
             const clean = res.content.replace(/```json/gi, '').replace(/```/g, '').trim();
             decision = JSON.parse(clean);
         } catch (e) {
-            decision = { shouldAlert: true, summary: res.content.slice(0, 300) };
+            decision = { shouldAlert: false, summary: res.content.slice(0, 300) };
         }
 
         auto.lastStatus = decision.shouldAlert ? 'alerted' : 'checked_no_alert';
         auto.lastResult = decision.summary;
+        logger.info(`Automation [${auto.id}] WebWatcher result: shouldAlert=${decision.shouldAlert} | ${decision.summary}`);
 
         if (decision.shouldAlert) {
             const embed = new EmbedBuilder()
@@ -354,25 +363,69 @@ class AutomationService {
     }
 
     async _runAgentTask(auto) {
-        const specialist = this.llmManager.getSpecialist('planning');
-        const res = await specialist.provider.chat([
+        const { getGroqTools, getGeminiTools, executeTool } = require('./llm/toolDefinitions');
+        const res = await this.llmManager.chatWithAgent([
             {
                 role: 'system',
-                content: 'You are ZenBot acting as Lance\'s autonomous background Hermes Agent. Perform this task concisely. If there are important findings or actions needed, report them clearly.'
+                content: (
+                    'You are ZenBot acting as Lance\'s autonomous background Hermes Agent.\n' +
+                    'You HAVE live tools (`fetch_web_page`, `web_search`, `read_discord_channel`, `read_file`, `search_files`, `run_command`, `propose_self_upgrade`). Use them directly to perform the scheduled task.\n' +
+                    '- If this task is a conditional check (e.g. "notify me IF rain is forecasted" or "ping me IF someone messages in Banorant") and the condition is NOT met right now, start your final response with `[NO_ALERT]` so Lance is not spammed.\n' +
+                    '- If you encounter a bug or missing capability in your own source code (`src/`) that prevents you from doing what Lance asked, inspect the relevant file with `read_file` and call `propose_self_upgrade` so Lance can approve the fix.'
+                )
             },
             {
                 role: 'user',
                 content: auto.prompt
             }
-        ], { model: specialist.model, temperature: 0.3 });
+        ], {
+            tools: getGroqTools(),
+            geminiTools: getGeminiTools(),
+            executeTool: (name, args) => executeTool(name, args, {
+                workspaceService: this.workspaceService,
+                webSearchService: this.webSearchService,
+                automationService: this,
+                selfUpgradeService: this.selfUpgradeService,
+                channelHistory: this.channelHistory,
+                userId: auto.userId,
+                channelId: auto.channelId,
+                isDM: true
+            }),
+            maxSteps: 4,
+            temperature: 0.2
+        });
+
+        const content = (res.content || '').trim();
+        const isSilent = content.includes('[NO_ALERT]');
+        const cleanSummary = content.replace(/\[NO_ALERT\]/gi, '').trim();
+
+        // Check if the background task staged any self-upgrade proposals
+        const stagedUpgrades = (res.executedTools || [])
+            .filter(t => t.result && t.result.status === 'pending_owner_approval')
+            .map(t => t.result.proposalId);
+
+        if (stagedUpgrades.length > 0 && this.selfUpgradeService) {
+            const pendingList = this.selfUpgradeService.getPendingProposals().filter(p => stagedUpgrades.includes(p.id));
+            if (pendingList.length > 0) {
+                const upgEmbed = this.selfUpgradeService.buildProposalEmbed(pendingList);
+                await this._sendAlert(auto, { embeds: [upgEmbed] });
+            }
+        }
+
+        if (isSilent && stagedUpgrades.length === 0) {
+            auto.lastStatus = 'checked_no_alert';
+            auto.lastResult = cleanSummary.slice(0, 200) || 'Checked; condition not met.';
+            logger.info(`Automation [${auto.id}] AgentTask silent check: ${auto.lastResult}`);
+            return;
+        }
 
         auto.lastStatus = 'success';
-        auto.lastResult = res.content.slice(0, 200);
+        auto.lastResult = cleanSummary.slice(0, 200);
 
         const embed = new EmbedBuilder()
             .setTitle(`🤖 Scheduled Task Update: ${auto.name}`)
             .setColor(0x2ec4b6)
-            .setDescription(res.content.slice(0, 1900))
+            .setDescription(cleanSummary.slice(0, 1900) || 'Task completed.')
             .setFooter({ text: `Automated Task • ${auto.scheduleStr}` })
             .setTimestamp();
 

@@ -28,7 +28,7 @@ const toolSpecs = [
     },
     {
         name: 'write_file',
-        description: 'Create a new file or completely overwrite an existing file inside the project workspace.',
+        description: 'Create a new file or completely overwrite an existing file inside the project workspace. Note: Modifying ZenBot source code files (src/, index.js, etc.) automatically stages a permission request for Lance to approve.',
         parameters: {
             type: 'object',
             properties: {
@@ -39,6 +39,10 @@ const toolSpecs = [
                 content: {
                     type: 'string',
                     description: 'The full text content to write into the file.'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Why this file is being created or modified.'
                 }
             },
             required: ['filePath', 'content']
@@ -46,7 +50,7 @@ const toolSpecs = [
     },
     {
         name: 'edit_file',
-        description: 'Perform an exact substring replacement in a file. Ideal for precise code modifications and updating specific functions without wiping the file.',
+        description: 'Perform an exact substring replacement in a file. Note: Modifying ZenBot source code files (src/, index.js, etc.) automatically stages a permission request for Lance to approve before applying.',
         parameters: {
             type: 'object',
             properties: {
@@ -61,9 +65,65 @@ const toolSpecs = [
                 replacementContent: {
                     type: 'string',
                     description: 'The new block of code/text to insert.'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Brief explanation of why this code edit is needed.'
                 }
             },
             required: ['filePath', 'targetContent', 'replacementContent']
+        }
+    },
+    {
+        name: 'propose_self_upgrade',
+        description: 'Propose a code fix or new capability upgrade to ZenBot\'s own codebase when you encounter a bug, limitation, or missing feature. Stages the change and asks Lance for permission ("approve" / "reject") before modifying disk.',
+        parameters: {
+            type: 'object',
+            properties: {
+                filePath: {
+                    type: 'string',
+                    description: 'Relative path of the source file to fix or upgrade (e.g. "src/services/automationService.js").'
+                },
+                operation: {
+                    type: 'string',
+                    description: '"edit" for replacing a block of code in an existing file, or "write" for creating a new file.'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Clear explanation for Lance of what problem this fixes or what new capability it adds.'
+                },
+                targetContent: {
+                    type: 'string',
+                    description: 'Required if operation="edit": the exact existing code block to replace (read the file first with read_file).'
+                },
+                replacementContent: {
+                    type: 'string',
+                    description: 'Required if operation="edit": the new replacement code block.'
+                },
+                content: {
+                    type: 'string',
+                    description: 'Required if operation="write": full content of the new file.'
+                }
+            },
+            required: ['filePath', 'operation', 'reason']
+        }
+    },
+    {
+        name: 'read_discord_channel',
+        description: 'Read recent messages from any connected Discord server or channel (e.g. "BANORANTTT", "col", "rodericks", "#general", or a server/channel ID). Use this to check server activity or watch for new messages.',
+        parameters: {
+            type: 'object',
+            properties: {
+                target: {
+                    type: 'string',
+                    description: 'Server name (e.g. "banorant"), channel name (e.g. "general"), or Discord server/channel ID (e.g. "1484106877708013608").'
+                },
+                limit: {
+                    type: 'integer',
+                    description: 'Number of recent messages to fetch (default: 20, max: 50).'
+                }
+            },
+            required: ['target']
         }
     },
     {
@@ -289,7 +349,7 @@ function getGeminiTools() {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, automationService, userId, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, userId, channelId, isDM = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -319,12 +379,82 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
 
             case 'write_file': {
                 if (!workspaceService) return { error: 'WorkspaceService is not available.' };
+                if (selfUpgradeService && selfUpgradeService.requiresPermission(args.filePath)) {
+                    const proposal = selfUpgradeService.stageProposal({
+                        filePath: args.filePath,
+                        operation: 'write',
+                        content: args.content,
+                        reason: args.reason || `Write to protected source file ${args.filePath}`,
+                        userId,
+                        channelId
+                    });
+                    return {
+                        status: 'pending_owner_approval',
+                        proposalId: proposal.id,
+                        filePath: proposal.filePath,
+                        message: `Staged self-upgrade proposal [${proposal.id}] for "${proposal.filePath}". Explain the change to Lance and ask him to reply "approve" (or "yes") to apply it.`
+                    };
+                }
                 return await workspaceService.writeFile(args.filePath, args.content);
             }
 
             case 'edit_file': {
                 if (!workspaceService) return { error: 'WorkspaceService is not available.' };
+                if (selfUpgradeService && selfUpgradeService.requiresPermission(args.filePath)) {
+                    const proposal = selfUpgradeService.stageProposal({
+                        filePath: args.filePath,
+                        operation: 'edit',
+                        targetContent: args.targetContent,
+                        replacementContent: args.replacementContent,
+                        reason: args.reason || `Edit protected source file ${args.filePath}`,
+                        userId,
+                        channelId
+                    });
+                    return {
+                        status: 'pending_owner_approval',
+                        proposalId: proposal.id,
+                        filePath: proposal.filePath,
+                        message: `Staged self-upgrade proposal [${proposal.id}] for "${proposal.filePath}". Explain the fix/upgrade to Lance and ask him to reply "approve" (or "yes") to apply it.`
+                    };
+                }
                 return await workspaceService.editFile(args.filePath, args.targetContent, args.replacementContent);
+            }
+
+            case 'propose_self_upgrade': {
+                if (!selfUpgradeService) return { error: 'SelfUpgradeService is not available.' };
+                const proposal = selfUpgradeService.stageProposal({
+                    filePath: args.filePath,
+                    operation: args.operation === 'write' ? 'write' : 'edit',
+                    targetContent: args.targetContent,
+                    replacementContent: args.replacementContent,
+                    content: args.content,
+                    reason: args.reason,
+                    userId,
+                    channelId
+                });
+                return {
+                    status: 'pending_owner_approval',
+                    proposalId: proposal.id,
+                    filePath: proposal.filePath,
+                    reason: proposal.reason,
+                    message: `Staged self-upgrade proposal [${proposal.id}] for "${proposal.filePath}". A permission request card will be shown to Lance so he can reply "approve" or "reject".`
+                };
+            }
+
+            case 'read_discord_channel': {
+                if (!channelHistory) return { error: 'ChannelHistoryService is not available.' };
+                const targetCh = channelHistory.resolveTargetChannel(args.target || '');
+                if (!targetCh) {
+                    return { error: `Could not find a readable text channel matching "${args.target}". Connected servers: col (873791689939107861), rodericks (1422544961597083712), BANORANTTT (1484106877708013608).` };
+                }
+                const data = await channelHistory.fetchRecentTranscript(targetCh, args.limit || 20);
+                return {
+                    server: data.guildName,
+                    channel: `#${data.channelName}`,
+                    channelId: targetCh.id,
+                    messageCount: data.messageCount,
+                    transcript: data.transcript || '(No recent messages)'
+                };
             }
 
             case 'list_directory': {

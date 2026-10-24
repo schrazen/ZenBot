@@ -2,7 +2,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, reminderService, webSearchService, goalService, automationService }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, selfUpgradeService, reminderService, webSearchService, goalService, automationService }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -12,6 +12,7 @@ class MessageHandler {
         this.ownerAvailability = ownerAvailability;
         this.studyService = studyService;
         this.workspaceService = workspaceService;
+        this.selfUpgradeService = selfUpgradeService;
         this.reminderService = reminderService;
         this.webSearchService = webSearchService;
         this.goalService = goalService;
@@ -154,6 +155,20 @@ class MessageHandler {
 
         const userQuery = this.cleanContent(message);
         const speakerName = message.member?.displayName || message.author.username;
+
+        // 2b. Owner Self-Upgrade Approval / Rejection Gate
+        if (isOwner && this.selfUpgradeService && this.selfUpgradeService.hasPendingProposals()) {
+            const cleanApprove = userQuery.trim();
+            const approveMatch = cleanApprove.match(/^(?:approve|approved|yes|yep|yeah|sure|go\s+ahead|sige|apply|do\s+it|proceed)(?:\s+(all|latest|upg_[a-z0-9_]+))?[.!]*$/i);
+            const rejectMatch = cleanApprove.match(/^(?:reject|rejected|no|nope|cancel|deny|wag|discard)(?:\s+(all|latest|upg_[a-z0-9_]+))?[.!]*$/i);
+
+            if (approveMatch) {
+                return await this.commandHandler.cmdApproveUpgrade(message, approveMatch[1] || 'all');
+            }
+            if (rejectMatch) {
+                return await this.commandHandler.cmdRejectUpgrade(message, rejectMatch[1] || 'all');
+            }
+        }
 
         // 3. Active Acads / Study Review Session in this channel
         if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
@@ -412,6 +427,8 @@ class MessageHandler {
                     geminiTools,
                     executeTool: (name, args) => executeTool(name, args, {
                         workspaceService: this.workspaceService,
+                        selfUpgradeService: this.selfUpgradeService,
+                        channelHistory: this.channelHistory,
                         reminderService: this.reminderService,
                         webSearchService: this.webSearchService,
                         automationService: this.automationService,
@@ -499,6 +516,8 @@ class MessageHandler {
                         geminiTools: getGeminiTools(),
                         executeTool: (name, args) => executeTool(name, args, {
                             workspaceService: this.workspaceService,
+                            selfUpgradeService: this.selfUpgradeService,
+                            channelHistory: this.channelHistory,
                             reminderService: this.reminderService,
                             webSearchService: this.webSearchService,
                             automationService: this.automationService,
@@ -531,6 +550,26 @@ class MessageHandler {
                 }
 
                 currentResponse = nextResponse;
+            }
+
+            // If any tool calls during this turn staged a self-upgrade proposal awaiting Lance's approval,
+            // display the Permission Request Embed automatically!
+            if (isOwner && this.selfUpgradeService) {
+                const allExecuted = [
+                    ...(response.executedTools || []),
+                    ...(currentResponse !== response ? (currentResponse.executedTools || []) : [])
+                ];
+                const stagedIds = allExecuted
+                    .filter(t => t.result && t.result.status === 'pending_owner_approval')
+                    .map(t => t.result.proposalId);
+
+                if (stagedIds.length > 0) {
+                    const pendingList = this.selfUpgradeService.getPendingProposals().filter(p => stagedIds.includes(p.id));
+                    if (pendingList.length > 0) {
+                        const proposalEmbed = this.selfUpgradeService.buildProposalEmbed(pendingList);
+                        await message.channel.send({ embeds: [proposalEmbed] });
+                    }
+                }
             }
 
             // Persist turns to memory
