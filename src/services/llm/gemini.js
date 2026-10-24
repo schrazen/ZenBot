@@ -3,8 +3,8 @@ const logger = require('../../utils/logger');
 class GeminiProvider {
     constructor(config) {
         this.apiKey = config.apiKey;
-        this.model = config.model || 'gemini-3.1-flash-lite';
-        this.fallbackModel = config.fallbackModel || 'gemini-2.5-flash';
+        this.model = config.model || 'gemini-3.5-flash-lite';
+        this.fallbackModel = config.fallbackModel || 'gemini-3.8-flash';
         this.maxTokens = config.maxTokens || 500;
         this.temperature = config.temperature ?? 0.7;
         this.name = 'gemini';

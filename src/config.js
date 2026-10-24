@@ -109,8 +109,8 @@ const config = {
         },
         gemini: {
             apiKey: process.env.GEMINI_API_KEY || '',
-            model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
-            fallbackModel: 'gemini-flash-latest',
+            model: process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
+            fallbackModel: 'gemini-3.8-flash',
             maxTokens: parseInt(process.env.GEMINI_MAX_TOKENS || '500', 10),
             temperature: parseFloat(process.env.GEMINI_TEMPERATURE || '0.7')
         },
