@@ -134,7 +134,8 @@ const config = {
         memories: path.join(rootDir, 'data', 'memories.json'),
         reminders: path.join(rootDir, 'data', 'reminders.json'),
         preferences: path.join(rootDir, 'data', 'preferences.json'),
-        goals: path.join(rootDir, 'data', 'goals.json')
+        goals: path.join(rootDir, 'data', 'goals.json'),
+        automations: path.join(rootDir, 'data', 'automations.json')
     },
 
     // Autonomy & Tool Execution

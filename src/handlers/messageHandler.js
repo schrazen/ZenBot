@@ -2,7 +2,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class MessageHandler {
-    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, reminderService, webSearchService, goalService }) {
+    constructor({ config, llmManager, memoryManager, commandHandler, channelHistory, client, ownerAvailability, studyService, workspaceService, reminderService, webSearchService, goalService, automationService }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -15,6 +15,7 @@ class MessageHandler {
         this.reminderService = reminderService;
         this.webSearchService = webSearchService;
         this.goalService = goalService;
+        this.automationService = automationService;
         this.processedMessageIds = new Set();
         this.showTokens = false;
     }
@@ -413,6 +414,7 @@ class MessageHandler {
                         workspaceService: this.workspaceService,
                         reminderService: this.reminderService,
                         webSearchService: this.webSearchService,
+                        automationService: this.automationService,
                         userId: message.author.id,
                         channelId: message.channel.id,
                         isDM

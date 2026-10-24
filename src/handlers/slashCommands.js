@@ -378,7 +378,25 @@ const slashCommands = [
 
     new SlashCommandBuilder()
         .setName('preferences')
-        .setDescription('View all learned agent preferences & habits (Lance only)')
+        .setDescription('View all learned agent preferences & habits (Lance only)'),
+
+    new SlashCommandBuilder()
+        .setName('automate')
+        .setDescription('Schedule background watcher or morning briefing (Lance only)')
+        .addStringOption(opt =>
+            opt.setName('schedule')
+                .setDescription('Interval or time (e.g. "daily at 8am", "every 2 hours", "every 30m")')
+                .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('task')
+                .setDescription('Task to run (e.g. "morning standup", "check https://... for price drop")')
+                .setRequired(true)
+        ),
+
+    new SlashCommandBuilder()
+        .setName('automations')
+        .setDescription('List all active background automations and watchers (Lance only)')
 ];
 
 /**

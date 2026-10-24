@@ -190,6 +190,54 @@ const toolSpecs = [
             },
             required: ['id']
         }
+    },
+    {
+        name: 'schedule_automation',
+        description: 'Schedule a recurring autonomous Hermes Agent watcher or background task (e.g. "daily at 8am send my standup", "every 2 hours check https://example.com for price drops", "every 6 hours check git status"). Runs independently even when Lance is away.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: {
+                    type: 'string',
+                    description: 'Brief 2-5 word name describing the watcher or automation.'
+                },
+                scheduleStr: {
+                    type: 'string',
+                    description: 'When/how often to run: "every 30m", "every 1 hour", "every 2 hours", "daily at 8am", etc.'
+                },
+                prompt: {
+                    type: 'string',
+                    description: 'The task instructions or condition to monitor.'
+                },
+                url: {
+                    type: 'string',
+                    description: 'Optional URL to monitor for web watcher tasks.'
+                }
+            },
+            required: ['name', 'scheduleStr', 'prompt']
+        }
+    },
+    {
+        name: 'list_automations',
+        description: 'List all currently active scheduled autonomous watchers and background tasks.',
+        parameters: {
+            type: 'object',
+            properties: {}
+        }
+    },
+    {
+        name: 'delete_automation',
+        description: 'Cancel or delete an active automation by its ID or index number.',
+        parameters: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'The automation ID (e.g. "auto_123...") or numeric index.'
+                }
+            },
+            required: ['id']
+        }
     }
 ];
 
@@ -241,7 +289,7 @@ function getGeminiTools() {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, userId, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, automationService, userId, channelId, isDM = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -333,6 +381,51 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
             case 'delete_reminder': {
                 if (!reminderService) return { error: 'ReminderService is not available.' };
                 return reminderService.deleteReminder(args.id, userId);
+            }
+
+            case 'schedule_automation': {
+                if (!automationService) return { error: 'AutomationService is not available.' };
+                try {
+                    const auto = automationService.addAutomation({
+                        name: args.name,
+                        scheduleStr: args.scheduleStr,
+                        prompt: args.prompt,
+                        url: args.url,
+                        userId,
+                        channelId,
+                        isDM
+                    });
+                    return {
+                        success: true,
+                        automationId: auto.id,
+                        name: auto.name,
+                        schedule: auto.scheduleStr,
+                        nextRun: new Date(auto.scheduleMeta.nextRun).toLocaleString()
+                    };
+                } catch (e) {
+                    return { error: e.message };
+                }
+            }
+
+            case 'list_automations': {
+                if (!automationService) return { error: 'AutomationService is not available.' };
+                const list = automationService.listAutomations(userId);
+                return {
+                    count: list.length,
+                    automations: list.map((a, i) => ({
+                        index: i + 1,
+                        id: a.id,
+                        name: a.name,
+                        schedule: a.scheduleStr,
+                        nextRun: new Date(a.scheduleMeta?.nextRun || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        lastStatus: a.lastStatus
+                    }))
+                };
+            }
+
+            case 'delete_automation': {
+                if (!automationService) return { error: 'AutomationService is not available.' };
+                return automationService.deleteAutomation(args.id, userId);
             }
 
             default:

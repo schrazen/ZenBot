@@ -12,6 +12,8 @@ const WorkspaceService = require('./services/workspaceService');
 const ReminderService = require('./services/reminderService');
 const WebSearchService = require('./services/webSearchService');
 const GoalService = require('./services/goalService');
+const AutomationService = require('./services/automationService');
+const MessageQueueService = require('./services/messageQueueService');
 const { registerSlashCommands } = require('./handlers/slashCommands');
 const logger = require('./utils/logger');
 
@@ -65,6 +67,16 @@ class ZenBot {
             memoryManager: this.memoryManager,
             client: this.client
         });
+        this.automationService = new AutomationService({
+            config: this.config,
+            llmManager: this.llmManager,
+            webSearchService: this.webSearchService,
+            workspaceService: this.workspaceService,
+            memoryManager: this.memoryManager,
+            client: this.client,
+            storagePath: this.config.paths.automations
+        });
+        this.messageQueueService = new MessageQueueService(1800);
 
         this.commandHandler = new CommandHandler({
             config: this.config,
@@ -78,6 +90,7 @@ class ZenBot {
             reminderService: this.reminderService,
             webSearchService: this.webSearchService,
             goalService: this.goalService,
+            automationService: this.automationService,
             client: this.client
         });
 
@@ -93,6 +106,7 @@ class ZenBot {
             reminderService: this.reminderService,
             webSearchService: this.webSearchService,
             goalService: this.goalService,
+            automationService: this.automationService,
             client: this.client
         });
 
@@ -115,6 +129,7 @@ class ZenBot {
             this.botProfileService.applyPresence(this.client);
             this.botProfileService.watchProfile(this.client);
             this.reminderService.start(this.client);
+            this.automationService.start(this.client);
 
             if (!this.botProfileService.getProfile().bio) {
                 this.botProfileService.fetchBio(this.config.discord.token).catch(() => {});
@@ -128,7 +143,9 @@ class ZenBot {
 
         this.client.on('messageCreate', async (message) => {
             try {
-                await this.messageHandler.handle(message);
+                this.messageQueueService.enqueue(message, async (finalMsg) => {
+                    await this.messageHandler.handle(finalMsg);
+                });
             } catch (err) {
                 logger.error('Unhandled error in messageCreate event:', err);
             }
@@ -182,6 +199,9 @@ class ZenBot {
         logger.info('Shutting down ZenBot gracefully...');
         if (this.reminderService) {
             this.reminderService.stop();
+        }
+        if (this.automationService) {
+            this.automationService.stop();
         }
         this.client.destroy();
         process.exit(0);

@@ -5,7 +5,7 @@ const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
 class CommandHandler {
-    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, reminderService, webSearchService, goalService, client }) {
+    constructor({ config, llmManager, memoryManager, channelHistory, ownerAvailability, studyService, botProfileService, workspaceService, reminderService, webSearchService, goalService, automationService, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.memoryManager = memoryManager;
@@ -17,6 +17,7 @@ class CommandHandler {
         this.reminderService = reminderService;
         this.webSearchService = webSearchService;
         this.goalService = goalService;
+        this.automationService = automationService;
         this.client = client;
     }
 
@@ -178,6 +179,25 @@ class CommandHandler {
             case 'delpref':
                 if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can delete learned preferences.');
                 return await this.cmdDeletePreference(message, argText);
+            case 'automate':
+            case 'auto':
+            case 'cron':
+            case 'watch':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can create background automations.');
+                return await this.cmdAutomate(message, args, argText);
+            case 'automations':
+            case 'autos':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can view background automations.');
+                return await this.cmdListAutomations(message);
+            case 'delauto':
+            case 'delcron':
+            case 'cancelauto':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can delete background automations.');
+                return await this.cmdDeleteAutomation(message, argText);
+            case 'triggerauto':
+            case 'runauto':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can run automations.');
+                return await this.cmdTriggerAutomation(message, argText);
             case 'web':
             case 'searchweb':
             case 'ddg':
@@ -280,6 +300,15 @@ class CommandHandler {
                         '`!preferences` / `!rules` — View all learned user preferences & habits\n' +
                         '`!delrule <id|index>` — Remove a learned preference rule\n' +
                         '`!web <query>` — Zero-key DuckDuckGo web search'
+                    )
+                },
+                {
+                    name: 'Hermes Background Automations & Watchers (Lance Only)',
+                    value: (
+                        '`!automate <interval> do <prompt>` — Schedule background watcher/briefing (e.g. `!automate daily at 8am do morning standup`, `!automate every 2 hours do check https://example.com for price drops`)\n' +
+                        '`!automations` / `!autos` — List active autonomous background tasks\n' +
+                        '`!triggerauto <id|index>` — Run an automation immediately\n' +
+                        '`!delauto <id|index>` — Remove a scheduled automation'
                     )
                 },
                 {
@@ -1785,6 +1814,22 @@ class CommandHandler {
                     return await this.cmdPreferences(adapter, [], '', 'preferences');
                 }
 
+                case 'automate': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can schedule background automations.');
+                    }
+                    const sched = interaction.options.getString('schedule') || '';
+                    const task = interaction.options.getString('task') || '';
+                    return await this.cmdAutomate(adapter, [], `${sched} do ${task}`);
+                }
+
+                case 'automations': {
+                    if (!this.isOwner(adapter)) {
+                        return await adapter.reply('Only Lance (bot owner) can view background automations.');
+                    }
+                    return await this.cmdListAutomations(adapter);
+                }
+
                 case 'provider': {
                     if (!this.isOwner(adapter)) {
                         return await adapter.reply('Only Lance (bot owner) can switch active AI providers.');
@@ -2292,6 +2337,166 @@ class CommandHandler {
             return await message.reply({ embeds: [embed] });
         } catch (err) {
             return await message.reply(`✗ Web search failed: ${err.message}`);
+        }
+    }
+
+    // ==========================================
+    // HERMES BACKGROUND AUTOMATIONS & WATCHERS
+    // ==========================================
+
+    async cmdAutomate(message, args, argText) {
+        if (!this.automationService) {
+            return await message.reply('AutomationService is not initialized.');
+        }
+
+        if (!argText || !argText.trim()) {
+            return await message.reply(
+                'Usage: `!automate <schedule> do <task/prompt>`\n' +
+                'Examples:\n' +
+                '• `!automate daily at 8am do morning standup`\n' +
+                '• `!automate every 2 hours do check https://example.com for price drops`\n' +
+                '• `!automate every 4h do check git status and alert me if uncommitted changes`'
+            );
+        }
+
+        let schedulePart = '';
+        let taskPart = '';
+
+        if (/\s+(?:do|to)\s+/i.test(argText)) {
+            const split = argText.split(/\s+(?:do|to)\s+/i);
+            schedulePart = split[0].trim();
+            taskPart = split.slice(1).join(' do ').trim();
+        } else {
+            const tokens = argText.trim().split(/\s+/);
+            if (tokens[0].toLowerCase() === 'every') {
+                schedulePart = tokens.slice(0, 3).join(' ');
+                taskPart = tokens.slice(3).join(' ');
+            } else if (tokens[0].toLowerCase() === 'daily') {
+                schedulePart = tokens.slice(0, 3).join(' ');
+                taskPart = tokens.slice(3).join(' ');
+            } else {
+                schedulePart = tokens.slice(0, 2).join(' ');
+                taskPart = tokens.slice(2).join(' ');
+            }
+        }
+
+        if (!taskPart) {
+            return await message.reply('Please specify the task or condition to monitor. Example: `!automate daily at 8am do morning standup`');
+        }
+
+        let actionType = 'agent_task';
+        let url = null;
+        const urlMatch = taskPart.match(/https?:\/\/[^\s]+/i);
+        if (urlMatch) {
+            url = urlMatch[0];
+            actionType = 'web_watch';
+        } else if (taskPart.toLowerCase().includes('standup') || taskPart.toLowerCase().includes('briefing')) {
+            actionType = 'standup';
+        }
+
+        const name = taskPart.slice(0, 35);
+        try {
+            const auto = this.automationService.addAutomation({
+                name,
+                scheduleStr: schedulePart,
+                actionType,
+                prompt: taskPart,
+                url,
+                userId: message.author.id,
+                channelId: message.channel.id,
+                isDM: !message.guild
+            });
+
+            const embed = new EmbedBuilder()
+                .setTitle(`⚙️ Hermes Automation Scheduled!`)
+                .setColor(0x06d6a0)
+                .setDescription(`ZenBot will run this background surveillance task autonomously.`)
+                .addFields(
+                    { name: 'Name', value: auto.name, inline: true },
+                    { name: 'Schedule', value: auto.scheduleStr, inline: true },
+                    { name: 'Next Trigger', value: new Date(auto.scheduleMeta.nextRun).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }), inline: true },
+                    { name: 'Task', value: auto.prompt, inline: false }
+                )
+                .setFooter({ text: `ID: ${auto.id} • Use !automations to list or !delauto ${auto.id} to cancel` })
+                .setTimestamp();
+
+            return await message.reply({ embeds: [embed] });
+        } catch (err) {
+            return await message.reply(`⚠️ Could not schedule automation: ${err.message}`);
+        }
+    }
+
+    async cmdListAutomations(message) {
+        if (!this.automationService) return await message.reply('AutomationService is not initialized.');
+        const list = this.automationService.listAutomations(message.author.id);
+
+        if (list.length === 0) {
+            return await message.reply(
+                'No active background automations.\n' +
+                'Set one up with: `!automate <schedule> do <task>`\n' +
+                '*(e.g. `!automate daily at 8am do morning standup` or `!automate every 2 hours do check https://... for updates`)*'
+            );
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle(`⏱️ Active Hermes Automations (${list.length})`)
+            .setColor(0x118ab2)
+            .setDescription(
+                list.map((a, i) => {
+                    const nextStr = a.scheduleMeta?.nextRun ? new Date(a.scheduleMeta.nextRun).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Pending';
+                    const lastRunStr = a.lastRun ? new Date(a.lastRun).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Never';
+                    return (
+                        `**${i + 1}. [${a.scheduleStr}]** "${a.name}"\n` +
+                        `└ Next: **${nextStr}** • Last: ${lastRunStr} (${a.lastStatus || 'pending'})\n` +
+                        `└ ID: \`${a.id}\``
+                    );
+                }).join('\n\n')
+            )
+            .setFooter({ text: 'Use !triggerauto <id> to test run or !delauto <id> to remove' })
+            .setTimestamp();
+
+        return await message.reply({ embeds: [embed] });
+    }
+
+    async cmdDeleteAutomation(message, argText) {
+        if (!this.automationService) return await message.reply('AutomationService is not initialized.');
+        if (!argText || !argText.trim()) {
+            return await message.reply('Usage: `!delauto <id|index>` (e.g. `!delauto 1` or `!delauto auto_123`)');
+        }
+
+        const res = this.automationService.deleteAutomation(argText.trim(), message.author.id);
+        if (res.success) {
+            return await message.reply(`✓ Cancelled background automation: "${res.removed.name}"`);
+        } else {
+            return await message.reply(`✗ ${res.message}`);
+        }
+    }
+
+    async cmdTriggerAutomation(message, argText) {
+        if (!this.automationService) return await message.reply('AutomationService is not initialized.');
+        if (!argText || !argText.trim()) {
+            return await message.reply('Usage: `!triggerauto <id|index>`');
+        }
+
+        const query = argText.trim().toLowerCase();
+        const list = this.automationService.listAutomations(message.author.id);
+        let target = list.find(a => a.id.toLowerCase() === query);
+
+        if (!target && /^\d+$/.test(query)) {
+            const idx = parseInt(query, 10) - 1;
+            if (idx >= 0 && idx < list.length) target = list[idx];
+        }
+
+        if (!target) {
+            return await message.reply(`No automation found matching "${argText}". Use \`!automations\` to check IDs.`);
+        }
+
+        try {
+            await message.reply(`🚀 Triggering automation **"${target.name}"** immediately...`);
+            await this.automationService.executeAutomation(target);
+            return await message.reply(`✓ Execution finished for **"${target.name}"**! (Status: ${target.lastStatus})`);
+        } catch (err) {
+            return await message.reply(`✗ Failed to execute automation: ${err.message}`);
         }
     }
 }
