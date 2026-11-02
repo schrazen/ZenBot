@@ -228,10 +228,78 @@ class LLMManager {
     }
 
     /**
+     * Extracts textual tool call patterns like `[Called tool read_file({"filePath":"..."})]`
+     * in case a model emits tool syntax in plain text instead of native tool_calls.
+     */
+    extractTextualToolCalls(content) {
+        if (!content || typeof content !== 'string') return { toolCalls: null, cleanContent: content || '' };
+        const regex = /\[Called tool\s+([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)\]/g;
+        const found = [];
+        let match;
+        while ((match = regex.exec(content)) !== null) {
+            const name = match[1].trim();
+            const rawJson = match[2].trim();
+            try {
+                // Validate JSON arguments
+                JSON.parse(rawJson);
+                found.push({
+                    id: `call_txt_${Date.now()}_${found.length}`,
+                    type: 'function',
+                    function: {
+                        name,
+                        arguments: rawJson
+                    }
+                });
+            } catch (e) {}
+        }
+
+        const cleanContent = content.replace(regex, '').trim();
+        return {
+            toolCalls: found.length > 0 ? found : null,
+            cleanContent
+        };
+    }
+
+    /**
+     * Detects when the LLM promises an immediate action ("Let me check index.js...",
+     * "Let me patch that file now...") without actually calling the tool yet.
+     */
+    isDeferredActionPromise(content, executedTools = []) {
+        if (!content || typeof content !== 'string') return false;
+        const text = content.trim();
+        if (text.length > 600) return false; // Detailed explanations are usually complete answers
+
+        // If the agent already staged an upgrade or performed the final action, do not force-continue
+        const terminalTools = new Set([
+            'propose_self_upgrade',
+            'write_file',
+            'edit_file',
+            'post_discord_message',
+            'set_owner_availability',
+            'schedule_automation',
+            'delete_automation',
+            'set_reminder',
+            'delete_reminder'
+        ]);
+        if (executedTools.some(t => terminalTools.has(t.name) || (t.result && t.result.status === 'pending_owner_approval'))) {
+            return false;
+        }
+
+        // Check for explicit "I'm about to do X right now / one sec / let me check" patterns
+        const promisePatterns = [
+            /\b(?:let me|i(?:'ll| will)\s+now|allow me to)\s+(?:check|read|inspect|search|look\s+at|patch|fix|edit|write|update|wire|add|implement|run|test|pull|fetch|verify|scan)\b/i,
+            /\b(?:one\s+sec(?:ond)?|give\s+me\s+a\s+sec(?:ond)?|hold\s+on)[,.\s—-]+(?:i(?:'ll| will)|let\s+me)\s+(?:check|read|inspect|search|patch|fix|pull|fetch|run)\b/i,
+            /\blet\s+me\s+(?:run\s+the\s+fix|patch\s+the|double[- ]check\s+the|search\s+for)\b/i
+        ];
+
+        return promisePatterns.some(pat => pat.test(text));
+    }
+
+    /**
      * Executes an agentic loop with tool/function calling support.
      * Iterates until the model generates a final response or maxSteps is reached.
      */
-    async chatWithAgent(messages, { tools = null, geminiTools = null, executeTool = null, maxSteps = 5, ...options } = {}) {
+    async chatWithAgent(messages, { tools = null, geminiTools = null, executeTool = null, maxSteps = 10, onProgress = null, ...options } = {}) {
         if (!tools || !executeTool) {
             return await this.chat(messages, options);
         }
@@ -239,6 +307,8 @@ class LLMManager {
         const workingMessages = [...messages];
         const executedTools = [];
         let currentStep = 0;
+        let promiseContinuations = 0;
+        const maxPromiseContinuations = 2;
         let lastResponse = null;
 
         while (currentStep < maxSteps) {
@@ -251,12 +321,56 @@ class LLMManager {
             };
 
             const response = await this.chat(workingMessages, currentOptions);
+
+            // Check if the model emitted a textual `[Called tool ...]` instead of native toolCalls
+            if ((!response.toolCalls || response.toolCalls.length === 0) && response.content) {
+                const extracted = this.extractTextualToolCalls(response.content);
+                if (extracted.toolCalls) {
+                    response.toolCalls = extracted.toolCalls;
+                    response.content = extracted.cleanContent;
+                }
+            }
+
             lastResponse = response;
 
             if (!response.toolCalls || response.toolCalls.length === 0) {
-                // Assistant provided final text answer
+                // Check if the model made an unfulfilled deferred action promise ("Let me check index.js now...")
+                if (
+                    promiseContinuations < maxPromiseContinuations &&
+                    currentStep < maxSteps &&
+                    this.isDeferredActionPromise(response.content, executedTools)
+                ) {
+                    promiseContinuations++;
+                    logger.info(`[Agent Auto-Step] Model promised action without calling a tool ("${response.content.slice(0, 80)}"). Continuing autonomously...`);
+
+                    if (typeof onProgress === 'function') {
+                        try {
+                            await onProgress({
+                                step: currentStep,
+                                maxSteps,
+                                phase: 'continuing',
+                                statusText: response.content.slice(0, 120),
+                                executedTools
+                            });
+                        } catch (e) {}
+                    }
+
+                    workingMessages.push({
+                        role: 'assistant',
+                        content: response.content
+                    });
+                    workingMessages.push({
+                        role: 'user',
+                        content: '[SYSTEM AUTONOMOUS CONTINUATION]: You just stated you would check, search, read, or fix something, but you did not call any tool. Do NOT wait for the user to reply "continue" or "okay"—invoke the appropriate tool right now and complete the task.'
+                    });
+                    continue;
+                }
+
+                // Clean any stray `[Called tool ...]` syntax before returning final answer
+                const finalClean = this.extractTextualToolCalls(response.content || '').cleanContent;
                 return {
                     ...response,
+                    content: finalClean || response.content || '',
                     executedTools
                 };
             }
@@ -272,7 +386,21 @@ class LLMManager {
             for (const call of response.toolCalls) {
                 const name = call.function?.name;
                 const rawArgs = call.function?.arguments;
-                logger.info(`[Agent Tool Call ${currentStep}] -> ${name}(${typeof rawArgs === 'string' ? rawArgs.slice(0, 100) : JSON.stringify(rawArgs).slice(0, 100)})`);
+                const argPreview = typeof rawArgs === 'string' ? rawArgs.slice(0, 100) : JSON.stringify(rawArgs).slice(0, 100);
+                logger.info(`[Agent Tool Call ${currentStep}] -> ${name}(${argPreview})`);
+
+                if (typeof onProgress === 'function') {
+                    try {
+                        await onProgress({
+                            step: currentStep,
+                            maxSteps,
+                            phase: 'tool_start',
+                            toolName: name,
+                            toolArgs: rawArgs,
+                            executedTools
+                        });
+                    } catch (e) {}
+                }
 
                 let result;
                 try {
@@ -288,6 +416,20 @@ class LLMManager {
                     result
                 });
 
+                if (typeof onProgress === 'function') {
+                    try {
+                        await onProgress({
+                            step: currentStep,
+                            maxSteps,
+                            phase: 'tool_done',
+                            toolName: name,
+                            toolArgs: rawArgs,
+                            toolResult: result,
+                            executedTools
+                        });
+                    } catch (e) {}
+                }
+
                 workingMessages.push({
                     role: 'tool',
                     tool_call_id: call.id,
@@ -296,11 +438,17 @@ class LLMManager {
             }
         }
 
-        // If loop exceeded maxSteps, make one final call without tools to summarize
+        // If loop reached maxSteps, make one final call without tools and instruct model to summarize results
         try {
+            workingMessages.push({
+                role: 'system',
+                content: '[SYSTEM]: Tool execution budget reached. Summarize what you found and accomplished clearly in plain text. NEVER output "[Called tool ...]" syntax.'
+            });
             const finalSummary = await this.chat(workingMessages, { ...options, tools: undefined, geminiTools: undefined });
+            const cleanSummary = this.extractTextualToolCalls(finalSummary.content || '').cleanContent;
             return {
                 ...finalSummary,
+                content: cleanSummary || finalSummary.content || 'Completed tool execution.',
                 executedTools
             };
         } catch (e) {

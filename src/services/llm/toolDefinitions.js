@@ -128,7 +128,7 @@ const toolSpecs = [
     },
     {
         name: 'post_discord_message',
-        description: 'Send/post a message to a channel in any connected Discord server (e.g. "BANORANTTT", "col", "rodericks", a channel name like "#general", or a channel/server ID). Only Lance is authorized to send messages through the bot.',
+        description: 'Send/post a message to a specific channel in a connected Discord server (e.g. "BANORANTTT", "col", "rodericks", "#general", or a channel/server ID). STRICT RULE: ONLY call this tool when Lance explicitly commands you to post or send a message to another channel/server. NEVER call this tool during normal conversation or banter.',
         parameters: {
             type: 'object',
             properties: {
@@ -142,6 +142,24 @@ const toolSpecs = [
                 }
             },
             required: ['target', 'message']
+        }
+    },
+    {
+        name: 'set_owner_availability',
+        description: 'Update or override Lance\'s availability/AFK status (e.g. when Lance says "my status is active, stop replying to my friends", "I am online", "I am going to sleep", or "I am away for 2 hours").',
+        parameters: {
+            type: 'object',
+            properties: {
+                state: {
+                    type: 'string',
+                    description: 'Target state: "online" (active, do not send AFK replies to friends), "away" (AFK/busy), "sleep" (asleep), or "auto" (automatic detection).'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Optional reason or duration (e.g. "in class for 2h", "active now").'
+                }
+            },
+            required: ['state']
         }
     },
     {
@@ -367,7 +385,7 @@ function getGeminiTools() {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, userId, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, userId, channelId, isDM = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -497,14 +515,35 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
                 };
             }
 
+            case 'set_owner_availability': {
+                if (!ownerAvailability) return { error: 'OwnerAvailabilityService is not available.' };
+                const stateArg = (args.state || 'online').toLowerCase().trim();
+                if (stateArg === 'online' || stateArg === 'available' || stateArg === 'on' || stateArg === 'active') {
+                    ownerAvailability.suppressChannel('global', 60 * 60 * 1000);
+                    const res = ownerAvailability.setManualState('on', args.reason || 'Active (confirmed by Lance)');
+                    return {
+                        success: true,
+                        state: 'AVAILABLE',
+                        message: res.message || 'Status set to AVAILABLE. AFK auto-replies to friends are suppressed.'
+                    };
+                }
+                const res = ownerAvailability.setManualState(stateArg, args.reason || null);
+                if (res.error) return { error: res.error };
+                return {
+                    success: true,
+                    state: res.state,
+                    message: res.message
+                };
+            }
+
             case 'list_directory': {
                 if (!workspaceService) return { error: 'WorkspaceService is not available.' };
-                return await workspaceService.listDirectory(args.dirPath || '.', args.depth || 1);
+                return await workspaceService.listDirectory(args.dirPath || args.path || '.', args.depth || 1);
             }
 
             case 'search_files': {
                 if (!workspaceService) return { error: 'WorkspaceService is not available.' };
-                return await workspaceService.searchFiles(args.query, args.dirPath || '.', 20);
+                return await workspaceService.searchFiles(args.query, args.dirPath || args.path || args.file || '.', 20);
             }
 
             case 'run_command': {

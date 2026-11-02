@@ -23,6 +23,7 @@ class OwnerAvailabilityService {
         this.lastChannelReply = new Map();
         this.lastUserReply = new Map();
         this.lastDmAlert = new Map();
+        this.suppressedChannels = new Map();
 
         // In-memory voice state
         this.voiceState = {
@@ -96,28 +97,41 @@ class OwnerAvailabilityService {
 
     /**
      * Records any observed owner activity.
+     * Safeguards against overwriting newer timestamps with older backfilled history.
      */
     recordActivity({ type = 'message', channelId = null, guildId = null, timestamp = Date.now(), isCommand = false } = {}) {
-        this.data.last_seen_timestamp = timestamp;
-
-        if (type === 'message') {
-            this.data.last_message_timestamp = timestamp;
-            this.data.last_message_channel_id = channelId;
-            this.data.last_message_guild_id = guildId;
-        } else if (type === 'bot_interaction') {
-            this.data.last_bot_interaction = timestamp;
-        } else if (type === 'reaction') {
-            this.data.last_reaction_timestamp = timestamp;
-        } else if (type === 'voice') {
-            this.voiceState.lastVoiceTimestamp = timestamp;
+        const ts = Number(timestamp) || Date.now();
+        if (ts > (this.data.last_seen_timestamp || 0)) {
+            this.data.last_seen_timestamp = ts;
         }
 
-        // Auto-clear manual away/sleep ONLY if owner is actively chatting in a server channel
+        if (type === 'message') {
+            if (ts >= (this.data.last_message_timestamp || 0)) {
+                this.data.last_message_timestamp = ts;
+                if (channelId) this.data.last_message_channel_id = channelId;
+                if (guildId) this.data.last_message_guild_id = guildId;
+            }
+        } else if (type === 'bot_interaction') {
+            if (ts > (this.data.last_bot_interaction || 0)) {
+                this.data.last_bot_interaction = ts;
+            }
+        } else if (type === 'reaction') {
+            if (ts > (this.data.last_reaction_timestamp || 0)) {
+                this.data.last_reaction_timestamp = ts;
+            }
+        } else if (type === 'voice') {
+            if (ts > (this.voiceState.lastVoiceTimestamp || 0)) {
+                this.voiceState.lastVoiceTimestamp = ts;
+            }
+        } else if (type === 'typing' || type === 'presence') {
+            // Updates last_seen_timestamp above
+        }
+
+        // Auto-clear manual away/sleep if owner is actively chatting in a server channel
         // Never clear on bot commands (!), bot interactions, or private DMs
-        if (this.data.manual_state && type === 'message' && guildId && !isCommand) {
+        if (this.data.manual_state && (this.data.manual_state === 'INACTIVE' || this.data.manual_state === 'LIKELY_ASLEEP') && type === 'message' && guildId && !isCommand) {
             const timeSinceManual = Date.now() - (this.data.manual_set_at || 0);
-            // Only auto-clear if manual state was set more than 15 minutes ago and owner is genuinely chatting
-            if (timeSinceManual > 15 * 60 * 1000) {
+            if (timeSinceManual > 5 * 60 * 1000 && ts >= Date.now() - 60 * 1000) {
                 logger.info(`Owner actively chatting in public channel; clearing manual state [${this.data.manual_state}]`);
                 this.data.manual_state = null;
                 this.data.manual_until = null;
@@ -126,6 +140,136 @@ class OwnerAvailabilityService {
         }
 
         this.saveState();
+    }
+
+    /**
+     * Suppresses unsolicited auto-replies in a specific channel (or 'global') for a duration.
+     */
+    suppressChannel(channelId = 'global', durationMs = 30 * 60 * 1000) {
+        const until = Date.now() + durationMs;
+        this.suppressedChannels.set(channelId, until);
+        this.suppressedChannels.set('global', until);
+        this.recordActivity({ type: 'message', channelId: channelId !== 'global' ? channelId : null, timestamp: Date.now() });
+        logger.info(`Suppressed owner availability auto-replies for ${Math.round(durationMs / 60000)}m (channel=${channelId})`);
+    }
+
+    /**
+     * Checks if auto-replies are currently suppressed by the owner.
+     */
+    isSuppressed(channelId) {
+        const now = Date.now();
+        const globalUntil = this.suppressedChannels.get('global') || 0;
+        if (now < globalUntil) return true;
+        if (channelId) {
+            const chUntil = this.suppressedChannels.get(channelId) || 0;
+            if (now < chUntil) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Inspects a single channel's recent messages to sync any recent owner activity
+     * that occurred while the bot was restarting or offline.
+     */
+    async syncChannelActivity(channel) {
+        if (!channel || !channel.messages) return;
+        try {
+            let messages = channel.messages.cache;
+            if (!messages || messages.size < 5) {
+                messages = await channel.messages.fetch({ limit: 15 }).catch(() => channel.messages.cache);
+            }
+            if (!messages) return;
+
+            let newestOwnerMsg = null;
+            for (const msg of messages.values()) {
+                if (msg && msg.author && this.isOwner(msg.author.id)) {
+                    if (!newestOwnerMsg || msg.createdTimestamp > newestOwnerMsg.createdTimestamp) {
+                        newestOwnerMsg = msg;
+                    }
+                }
+            }
+
+            if (newestOwnerMsg && newestOwnerMsg.createdTimestamp > (this.data.last_message_timestamp || 0)) {
+                this.recordActivity({
+                    type: 'message',
+                    channelId: channel.id,
+                    guildId: channel.guild?.id || null,
+                    timestamp: newestOwnerMsg.createdTimestamp,
+                    isCommand: false
+                });
+                logger.info(`Synced recent owner activity from #${channel.name || channel.id} (${Math.round((Date.now() - newestOwnerMsg.createdTimestamp) / 60000)}m ago)`);
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * Scans connected guilds on startup for live voice states and recent owner messages
+     * so the bot never wakes up with a stale multi-day timestamp when Lance was just chatting.
+     */
+    async syncRecentActivityFromGuilds(client = this.client) {
+        if (!client || !client.guilds?.cache) return;
+        try {
+            for (const guild of client.guilds.cache.values()) {
+                // 1. Check active voice states in this guild
+                if (guild.voiceStates?.cache) {
+                    for (const vs of guild.voiceStates.cache.values()) {
+                        if (vs.channelId && this.isOwner(vs.id || vs.member?.id)) {
+                            this.voiceState = {
+                                inVoice: true,
+                                channelId: vs.channelId,
+                                guildId: guild.id,
+                                streaming: !!vs.streaming,
+                                lastVoiceTimestamp: Date.now()
+                            };
+                            this.recordActivity({ type: 'voice', channelId: vs.channelId, guildId: guild.id });
+                        }
+                    }
+                }
+
+                // 2. Scan primary text channels (up to 3 readable text channels per guild)
+                if (guild.channels?.cache) {
+                    const textChannels = Array.from(guild.channels.cache.values())
+                        .filter(ch => ch && typeof ch.isTextBased === 'function' && ch.isTextBased() && !ch.isVoiceBased?.() && ch.viewable !== false)
+                        .slice(0, 3);
+
+                    for (const ch of textChannels) {
+                        await this.syncChannelActivity(ch);
+                    }
+                }
+            }
+        } catch (err) {
+            logger.warn(`Startup owner activity sync warning: ${err.message}`);
+        }
+    }
+
+    /**
+     * Checks live Discord presence across mutual guilds (if Presence Intent is available)
+     * as well as active voice channels.
+     */
+    checkLiveDiscordPresence() {
+        if (!this.client || !this.client.guilds?.cache) return { isOnline: false, status: null };
+        for (const guild of this.client.guilds.cache.values()) {
+            // Check voice state directly from guild cache
+            if (guild.voiceStates?.cache) {
+                for (const id of this.getOwnerIds()) {
+                    const vs = guild.voiceStates.cache.get(id);
+                    if (vs && vs.channelId) {
+                        return { isOnline: true, status: 'in_voice', channelId: vs.channelId };
+                    }
+                }
+            }
+
+            // Check presence cache if available
+            if (guild.presences?.cache) {
+                for (const id of this.getOwnerIds()) {
+                    const pres = guild.presences.cache.get(id);
+                    if (pres && ['online', 'idle', 'dnd'].includes(pres.status)) {
+                        return { isOnline: true, status: pres.status };
+                    }
+                }
+            }
+        }
+        return { isOnline: false, status: null };
     }
 
     /**
@@ -178,12 +322,23 @@ class OwnerAvailabilityService {
             }
         }
 
-        // 2. Check voice channel state
+        // 2. Check voice channel state & live Discord presence
         if (this.voiceState.inVoice) {
             return {
                 state: 'AVAILABLE',
-                confidence: 0.9,
+                confidence: 0.95,
                 reason: `Currently in voice channel (#${this.voiceState.channelId})${this.voiceState.streaming ? ' streaming' : ''}`
+            };
+        }
+
+        const livePresence = this.checkLiveDiscordPresence();
+        if (livePresence.isOnline) {
+            return {
+                state: 'AVAILABLE',
+                confidence: 0.95,
+                reason: livePresence.status === 'in_voice'
+                    ? `Currently in voice channel (#${livePresence.channelId})`
+                    : `Discord presence is ${livePresence.status.toUpperCase()}`
             };
         }
 
@@ -200,10 +355,10 @@ class OwnerAvailabilityService {
             return { state: 'UNKNOWN', confidence: 0.0, reason: 'No recorded owner activity' };
         }
 
-        const diffMinutes = Math.floor((now - lastActivity) / (60 * 1000));
+        const diffMinutes = Math.max(0, Math.floor((now - lastActivity) / (60 * 1000)));
 
-        // Active within last 15 minutes -> definitely AVAILABLE
-        if (diffMinutes < 15) {
+        // Active within last 20 minutes -> definitely AVAILABLE
+        if (diffMinutes < 20) {
             return {
                 state: 'AVAILABLE',
                 confidence: 0.95,
@@ -211,16 +366,16 @@ class OwnerAvailabilityService {
             };
         }
 
-        // Active within 15-45 minutes -> LIKELY_AVAILABLE
-        if (diffMinutes < 45) {
+        // Active within 20-60 minutes -> LIKELY_AVAILABLE
+        if (diffMinutes < 60) {
             return {
                 state: 'LIKELY_AVAILABLE',
-                confidence: 0.8,
+                confidence: 0.85,
                 reason: `Active ${diffMinutes}m ago`
             };
         }
 
-        // Inactive for 45 min - 2 hours -> INACTIVE
+        // Inactive for 60 min - 2 hours -> INACTIVE
         if (diffMinutes < 120) {
             return {
                 state: 'INACTIVE',
@@ -288,14 +443,19 @@ class OwnerAvailabilityService {
         }
 
         const ownerIds = this.getOwnerIds();
+        const content = (message.content || '').trim();
+        const lower = content.toLowerCase();
 
-        // 1. Direct mention of Lance
-        const directMention = ownerIds.some(id => message.mentions.users.has(id));
-        if (directMention) {
+        // 1. Direct mention of Lance (@schrazen)
+        // Note: In Discord, replying to a message also adds the author to message.mentions.users
+        // unless the user turns off @mention on reply. Distinguish between an explicit @tag in text
+        // vs a reply reference!
+        const hasExplicitTagInContent = ownerIds.some(id => content.includes(`<@${id}>`) || content.includes(`<@!${id}>`));
+        if (hasExplicitTagInContent) {
             return {
                 isContact: true,
                 confidence: 1.0,
-                reason: 'Direct mention of owner'
+                reason: 'Direct @mention of owner in message text'
             };
         }
 
@@ -304,25 +464,49 @@ class OwnerAvailabilityService {
             try {
                 const refMsg = await message.channel.messages.fetch(message.reference.messageId);
                 if (refMsg && this.isOwner(refMsg.author.id)) {
+                    // CRITICAL: Immediately record the timestamp of Lance's referenced message!
+                    // If the bot was offline when Lance sent refMsg, this ensures we never claim
+                    // Lance has been inactive for 43 hours when his message was sent 3 minutes ago.
+                    if (refMsg.createdTimestamp) {
+                        this.recordActivity({
+                            type: 'message',
+                            channelId: message.channel.id,
+                            guildId: message.guild.id,
+                            timestamp: refMsg.createdTimestamp,
+                            isCommand: false
+                        });
+                    }
+
+                    const refAgeMinutes = (Date.now() - (refMsg.createdTimestamp || 0)) / (60 * 1000);
+                    // If Lance sent that message within the last 60 minutes, he is part of the current conversation
+                    if (refAgeMinutes < 60) {
+                        return { isContact: false };
+                    }
+
+                    // Even on older messages, ignore passive reactions/laughter ("thats so crZy", "AHAHAHA", "lmao", "oo nga")
+                    // Only treat a reply as contact intent if it asks a question or calls out to Lance
+                    const isActiveInquiryOrCall = /[?]|\b(lance|schrazen|zen|asan|nasan|san|wer|where|tara|laro|valo|valorant|g\s*ba|online|tulog|gising|hoy|uy|pre|bro|tol|lods|bakit|ano|paano|kelan|kailan|wait|paki|check|tingnan)\b/i.test(lower);
+                    if (!isActiveInquiryOrCall) {
+                        return { isContact: false };
+                    }
+
                     return {
                         isContact: true,
-                        confidence: 0.95,
-                        reason: 'Replied to owner message'
+                        confidence: 0.9,
+                        reason: 'Replied to owner message with inquiry'
                     };
                 }
             } catch (e) {}
         }
 
-        const content = message.content.toLowerCase();
-
         // 3. Name references with contact/inquiry intent
-        const hasOwnerName = /\b(lance|schrazen|zen)\b/i.test(content);
+        const hasOwnerName = /\b(lance|schrazen|zen)\b/i.test(lower);
         if (!hasOwnerName) {
             return { isContact: false };
         }
 
         // Filter out purely casual / descriptive references (do NOT trigger)
-        const isDescriptive = /\b(reminds me of|said earlier|was right|according to|kagaya ni|tulad ni|sabi ni|kwento ni|balita kay)\s+(lance|schrazen|zen)\b/i.test(content);
+        const isDescriptive = /\b(reminds me of|said earlier|was right|according to|kagaya ni|tulad ni|sabi ni|kwento ni|balita kay)\s+(lance|schrazen|zen)\b/i.test(lower);
         if (isDescriptive) {
             return { isContact: false };
         }
@@ -489,39 +673,47 @@ class OwnerAvailabilityService {
         const channelId = message.channel.id;
         const lastAlert = this.lastDmAlert.get(channelId) || 0;
 
-        // Rate limit DM alerts to 1 alert per channel every 10 minutes
+        // Rate limit DM alerts to 1 alert per channel every 5 minutes
         if (now - lastAlert < this.cooldowns.dmAlert) {
             return;
         }
 
         this.lastDmAlert.set(channelId, now);
 
-        const ownerId = this.getOwnerIds()[0];
-        if (!ownerId) return;
+        const ownerIds = this.getOwnerIds();
+        if (!ownerIds || ownerIds.length === 0) return;
 
-        try {
-            const ownerUser = await this.client.users.fetch(ownerId);
-            if (!ownerUser) return;
+        const snippet = (message.cleanContent || message.content || '').slice(0, 300);
+        const channelName = message.channel.name || 'channel';
+        const guildName = message.guild?.name || 'Server';
 
-            const snippet = (message.cleanContent || message.content || '').slice(0, 300);
-            const channelName = message.channel.name || 'channel';
-            const guildName = message.guild?.name || 'Server';
+        const embed = new EmbedBuilder()
+            .setTitle('🔔 Discord Ping Alert')
+            .setColor(0xf72585)
+            .setDescription(
+                `**${callerName}** in **#${channelName}** (${guildName}) is trying to reach you while you appear **${stateInfo.state}**:\n\n` +
+                `> "${snippet}"\n\n` +
+                `[**Jump to Message**](${message.url})`
+            )
+            .setFooter({ text: `Status: ${stateInfo.state} • ${stateInfo.reason}` })
+            .setTimestamp();
 
-            const embed = new EmbedBuilder()
-                .setTitle('🔔 Discord Ping Alert')
-                .setColor(0xf72585)
-                .setDescription(
-                    `**${callerName}** in **#${channelName}** (${guildName}) is trying to reach you while you appear **${stateInfo.state}**:\n\n` +
-                    `> "${snippet}"\n\n` +
-                    `[**Jump to Message**](${message.url})`
-                )
-                .setFooter({ text: `Status: ${stateInfo.state} • ${stateInfo.reason}` })
-                .setTimestamp();
-
-            await ownerUser.send({ embeds: [embed] });
-            logger.info(`Dispatched DM alert to owner for ping from ${callerName} in #${channelName}`);
-        } catch (err) {
-            logger.warn(`Could not send DM alert to owner: ${err.message}`);
+        // Try each configured owner ID until one succeeds (e.g. primary active account 871274613227798589)
+        const orderedIds = [...ownerIds].sort((a, b) => (a === '871274613227798589' ? -1 : b === '871274613227798589' ? 1 : 0));
+        let lastErr = null;
+        for (const ownerId of orderedIds) {
+            try {
+                const ownerUser = await this.client.users.fetch(ownerId);
+                if (!ownerUser) continue;
+                await ownerUser.send({ embeds: [embed] });
+                logger.info(`Dispatched DM alert to owner (${ownerId}) for ping from ${callerName} in #${channelName}`);
+                return;
+            } catch (err) {
+                lastErr = err;
+            }
+        }
+        if (lastErr) {
+            logger.warn(`Could not send DM alert to owner: ${lastErr.message}`);
         }
     }
 
@@ -550,11 +742,20 @@ class OwnerAvailabilityService {
      * Returns: { isContact: boolean, responded: boolean, state: string, diffMinutes: number }
      */
     async checkAndRespond(message) {
+        // 0. If owner explicitly suppressed auto-replies recently, stay silent
+        if (this.isSuppressed(message.channel?.id)) {
+            return { isContact: false, responded: false, suppressedByOwner: true };
+        }
+
         // 1. Detect contact intent
         const intent = await this.detectContactIntent(message);
         if (!intent.isContact) {
             return { isContact: false, responded: false };
         }
+
+        // 1b. Sync recent channel messages before claiming owner is inactive!
+        // Ensures we never miss messages Lance sent while the bot was restarting.
+        await this.syncChannelActivity(message.channel);
 
         // 2. Evaluate owner availability state
         const stateInfo = this.getAvailabilityState();

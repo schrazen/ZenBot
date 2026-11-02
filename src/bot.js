@@ -28,7 +28,9 @@ class ZenBot {
                 GatewayIntentBits.MessageContent,
                 GatewayIntentBits.DirectMessages,
                 GatewayIntentBits.GuildVoiceStates,
-                GatewayIntentBits.GuildMessageReactions
+                GatewayIntentBits.GuildMessageReactions,
+                GatewayIntentBits.GuildMessageTyping,
+                GatewayIntentBits.DirectMessageTyping
             ],
             partials: [
                 Partials.Channel,
@@ -140,6 +142,7 @@ class ZenBot {
             this.botProfileService.watchProfile(this.client);
             this.reminderService.start(this.client);
             this.automationService.start(this.client);
+            this.ownerAvailability.syncRecentActivityFromGuilds(this.client).catch(() => {});
 
             if (!this.botProfileService.getProfile().bio) {
                 this.botProfileService.fetchBio(this.config.discord.token).catch(() => {});
@@ -189,6 +192,33 @@ class ZenBot {
             } catch (err) {
                 logger.error('Error in messageReactionAdd event:', err);
             }
+        });
+
+        this.client.on('typingStart', (typing) => {
+            try {
+                if (this.ownerAvailability.isOwner(typing?.user?.id)) {
+                    this.ownerAvailability.recordActivity({
+                        type: 'typing',
+                        channelId: typing.channel?.id,
+                        guildId: typing.guild?.id
+                    });
+                }
+            } catch (err) {
+                logger.error('Error in typingStart event:', err);
+            }
+        });
+
+        this.client.on('presenceUpdate', (oldPresence, newPresence) => {
+            try {
+                if (this.ownerAvailability.isOwner(newPresence?.userId)) {
+                    if (['online', 'idle', 'dnd'].includes(newPresence.status)) {
+                        this.ownerAvailability.recordActivity({
+                            type: 'presence',
+                            guildId: newPresence.guild?.id
+                        });
+                    }
+                }
+            } catch (err) {}
         });
 
         this.client.on('error', (err) => {

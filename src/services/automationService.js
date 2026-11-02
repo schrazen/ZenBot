@@ -250,7 +250,10 @@ class AutomationService {
         }
 
         // 2. Web Watcher (Check a URL for weather, price drops, keywords, updates)
-        if (auto.actionType === 'web_watch' || auto.url || /https?:\/\/[^\s]+/i.test(auto.prompt || '')) {
+        // Note: discord.com/channels/... URLs require the bot's native read_discord_channel tool via _runAgentTask
+        const targetUrlCandidate = auto.url || (auto.prompt?.match(/https?:\/\/[^\s]+/i)?.[0] || '');
+        const isDiscordChannelUrl = /discord\.com\/channels\//i.test(targetUrlCandidate);
+        if (!isDiscordChannelUrl && (auto.actionType === 'web_watch' || targetUrlCandidate)) {
             await this._runWebWatcher(auto);
             return;
         }

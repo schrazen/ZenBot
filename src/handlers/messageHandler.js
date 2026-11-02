@@ -170,6 +170,28 @@ class MessageHandler {
             }
         }
 
+        // 2c. Owner Dismissal / Availability Correction Gate
+        // Prevents unsolicited tool calls or argument back-and-forth when Lance tells the bot to be quiet or states he is active.
+        if (isOwner && this.ownerAvailability) {
+            const cleanQ = userQuery.trim();
+            const isDismissal = /^(?:stfu(?:\s+bro)?|shut\s+up(?:\s+bro)?|quiet|hush|tumahimik\s+ka|wag\s+ka\s+sumabat|i\s+didn'?t\s+ask\s+(?:u|you)\s+for\s+that)[.!]*$/i.test(cleanQ);
+            if (isDismissal) {
+                this.ownerAvailability.suppressChannel(message.channel.id, 60 * 60 * 1000);
+                try {
+                    await message.react('🤐');
+                } catch (e) {}
+                logger.info(`Owner dismissed bot in channel ${message.channel.id}; suppressed auto-replies for 60m.`);
+                return;
+            }
+
+            const isActiveStatusOverride = /\b(?:stop\s+replying\s+to\s+my\s+friends|my\s+status\s+is\s+(?:active|online)|no\s+need\s+to\s+tell\s+them\s+i'?m\s+(?:off|away|afk)|i'?m\s+(?:active|online)\s+now)\b/i.test(cleanQ);
+            if (isActiveStatusOverride) {
+                this.ownerAvailability.suppressChannel('global', 60 * 60 * 1000);
+                this.ownerAvailability.setManualState('on', 'Active (confirmed by Lance)');
+                logger.info(`Owner explicitly confirmed ACTIVE status; set state to AVAILABLE and suppressed AFK replies.`);
+            }
+        }
+
         // 3. Active Acads / Study Review Session in this channel
         if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
             const session = this.studyService.getSession(message.channel.id);
@@ -407,17 +429,71 @@ class MessageHandler {
             // Build multi-tier context with projects, temporal awareness, live chat transcript, and active study session
             const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
             const activeSession = this.studyService?.getSession(message.channel.id) || null;
+            const ownerAvailabilityState = this.ownerAvailability ? this.ownerAvailability.getAvailabilityState() : null;
             const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext, {
                 isDM,
                 isOwner,
-                activeStudySession: activeSession
+                activeStudySession: activeSession,
+                ownerAvailabilityState
             });
 
             // Execute LLM inference (with Agent tools for owner Lance, standard chat for server members)
             let response;
             const autonomyEnabled = this.config.autonomy?.enabled !== false;
 
-            if (isOwner && autonomyEnabled && (this.workspaceService || this.reminderService)) {
+            // In DMs, always enable full agent tools for Lance.
+            // In public server channels, only enable agent tools when Lance is asking for a task/action
+            // (prevents casual group-chat banter or laughter from accidentally invoking workspace/posting tools).
+            const hasTaskIntentInGuild = isDM || /\b(?:file|code|src|read|write|edit|patch|fix|upgrade|search|find|check|post|send|message|channel|server|banorant|col|rodericks|remind|alarm|schedule|automate|watch|status|available|away|sleep|online|offline|run|cmd|git|web|http|url)\b/i.test(effectiveQuery);
+            const useAgentLoop = isOwner && autonomyEnabled && hasTaskIntentInGuild && (this.workspaceService || this.reminderService);
+
+            // Live progress tracker message for multi-step agent operations
+            let progressMsg = null;
+            let lastProgressUpdateMs = 0;
+            const progressLines = [];
+
+            const formatToolSummary = (toolName, rawArgs) => {
+                let parsed = {};
+                if (typeof rawArgs === 'string') {
+                    try { parsed = JSON.parse(rawArgs); } catch (e) {}
+                } else if (rawArgs && typeof rawArgs === 'object') {
+                    parsed = rawArgs;
+                }
+                const detail = parsed.filePath || parsed.query || parsed.target || parsed.url || parsed.command || parsed.state || parsed.task || '';
+                return detail ? `\`${toolName}\` (${String(detail).slice(0, 50)})` : `\`${toolName}\``;
+            };
+
+            const updateLiveProgress = async (info) => {
+                try {
+                    if (info.phase === 'tool_start') {
+                        progressLines.push(`🔄 **Step ${info.step}:** Running ${formatToolSummary(info.toolName, info.toolArgs)}...`);
+                    } else if (info.phase === 'tool_done') {
+                        const err = info.toolResult?.error;
+                        const lastIdx = progressLines.length - 1;
+                        const label = `${err ? '⚠️' : '✅'} **Step ${info.step}:** ${formatToolSummary(info.toolName, info.toolArgs)}${err ? ` — *${String(err).slice(0, 60)}*` : ''}`;
+                        if (lastIdx >= 0 && progressLines[lastIdx].startsWith('🔄')) {
+                            progressLines[lastIdx] = label;
+                        } else {
+                            progressLines.push(label);
+                        }
+                    } else if (info.phase === 'continuing') {
+                        progressLines.push(`⚡ **Continuing:** Proceeding to next action...`);
+                    }
+
+                    const content = `⚙️ **ZenBot Agent Working...**\n${progressLines.slice(-6).join('\n')}`;
+                    const nowMs = Date.now();
+
+                    if (!progressMsg) {
+                        progressMsg = await message.channel.send(content);
+                        lastProgressUpdateMs = nowMs;
+                    } else if (info.phase === 'tool_done' || (nowMs - lastProgressUpdateMs) >= 1200) {
+                        await progressMsg.edit(content);
+                        lastProgressUpdateMs = nowMs;
+                    }
+                } catch (e) {}
+            };
+
+            if (useAgentLoop) {
                 const { getGroqTools, getGeminiTools, executeTool } = require('../services/llm/toolDefinitions');
                 const groqTools = getGroqTools();
                 const geminiTools = getGeminiTools();
@@ -425,6 +501,7 @@ class MessageHandler {
                 response = await this.llmManager.chatWithAgent(messages, {
                     tools: groqTools,
                     geminiTools,
+                    onProgress: updateLiveProgress,
                     executeTool: (name, args) => executeTool(name, args, {
                         workspaceService: this.workspaceService,
                         selfUpgradeService: this.selfUpgradeService,
@@ -432,14 +509,23 @@ class MessageHandler {
                         reminderService: this.reminderService,
                         webSearchService: this.webSearchService,
                         automationService: this.automationService,
+                        ownerAvailability: this.ownerAvailability,
                         userId: message.author.id,
                         channelId: message.channel.id,
                         isDM
                     }),
-                    maxSteps: 5
+                    maxSteps: 10
                 });
             } else {
                 response = await this.llmManager.chat(messages);
+            }
+
+            // Clean up live progress indicator message before posting final response
+            if (progressMsg) {
+                try {
+                    await progressMsg.delete();
+                } catch (e) {}
+                progressMsg = null;
             }
 
             let replyText = response.content;
@@ -509,11 +595,12 @@ class MessageHandler {
                 ];
 
                 let nextResponse;
-                if (isOwner && autonomyEnabled && (this.workspaceService || this.reminderService)) {
+                if (useAgentLoop) {
                     const { getGroqTools, getGeminiTools, executeTool } = require('../services/llm/toolDefinitions');
                     nextResponse = await this.llmManager.chatWithAgent(continuationMessages, {
                         tools: getGroqTools(),
                         geminiTools: getGeminiTools(),
+                        onProgress: updateLiveProgress,
                         executeTool: (name, args) => executeTool(name, args, {
                             workspaceService: this.workspaceService,
                             selfUpgradeService: this.selfUpgradeService,
@@ -521,12 +608,17 @@ class MessageHandler {
                             reminderService: this.reminderService,
                             webSearchService: this.webSearchService,
                             automationService: this.automationService,
+                            ownerAvailability: this.ownerAvailability,
                             userId: message.author.id,
                             channelId: message.channel.id,
                             isDM
                         }),
-                        maxSteps: 5
+                        maxSteps: 8
                     });
+                    if (progressMsg) {
+                        try { await progressMsg.delete(); } catch (e) {}
+                        progressMsg = null;
+                    }
                 } else {
                     nextResponse = await this.llmManager.chat(continuationMessages);
                 }
