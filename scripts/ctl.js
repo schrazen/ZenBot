@@ -32,32 +32,57 @@ const c = {
 function findZenProcesses() {
     const results = [];
     try {
-        const out = execSync('wmic process where "name=\'node.exe\'" get ProcessId,CommandLine /format:csv', {
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'ignore']
-        });
-
-        const lines = out.split(/\r?\n/).filter(line => line.includes('index.js') && !line.includes('ctl.js'));
-        for (const line of lines) {
-            const parts = line.split(',');
-            const pidStr = parts[parts.length - 1]?.trim();
-            const pid = parseInt(pidStr, 10);
-            if (!isNaN(pid)) {
-                let memMB = 0;
-                try {
-                    const taskOut = execSync(`tasklist /fi "PID eq ${pid}" /fo csv /nh`, {
-                        encoding: 'utf8',
-                        stdio: ['ignore', 'pipe', 'ignore']
-                    }).trim();
-                    const m = taskOut.match(/,"([0-9,]+)\s*K"/i);
-                    if (m) {
-                        const kb = parseInt(m[1].replace(/,/g, ''), 10);
-                        memMB = Math.round((kb / 1024) * 10) / 10;
+        try {
+            const out = execSync('powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"name = \'node.exe\'\\" | Select-Object ProcessId,CommandLine | ConvertTo-Csv -NoTypeInformation"', {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore']
+            });
+            const lines = out.split(/\r?\n/).filter(line => {
+                const lower = line.toLowerCase();
+                return lower.includes('index.js') && !lower.includes('ctl.js') && !lower.includes('mcp');
+            });
+            for (const line of lines) {
+                const m = line.match(/^"?(\d+)"?/);
+                if (m) {
+                    const pid = parseInt(m[1], 10);
+                    if (!isNaN(pid) && pid !== process.pid) {
+                        let memMB = 0;
+                        try {
+                            const taskOut = execSync(`tasklist /fi "PID eq ${pid}" /fo csv /nh`, {
+                                encoding: 'utf8',
+                                stdio: ['ignore', 'pipe', 'ignore']
+                            }).trim();
+                            const memM = taskOut.match(/,"([0-9,]+)\s*K"/i);
+                            if (memM) {
+                                const kb = parseInt(memM[1].replace(/,/g, ''), 10);
+                                memMB = Math.round((kb / 1024) * 10) / 10;
+                            }
+                        } catch (e) {}
+                        results.push({ ProcessId: pid, MemoryMB: memMB });
                     }
-                } catch (e) {}
-
-                results.push({ ProcessId: pid, MemoryMB: memMB });
+                }
             }
+        } catch (e) {}
+
+        if (results.length === 0) {
+            try {
+                const out = execSync('wmic process where "name=\'node.exe\'" get ProcessId,CommandLine /format:csv', {
+                    encoding: 'utf8',
+                    stdio: ['ignore', 'pipe', 'ignore']
+                });
+                const wmicLines = out.split(/\r?\n/).filter(line => {
+                    const lower = line.toLowerCase();
+                    return lower.includes('index.js') && !lower.includes('ctl.js') && !lower.includes('mcp');
+                });
+                for (const line of wmicLines) {
+                    const parts = line.split(',');
+                    const pidStr = parts[parts.length - 1]?.trim();
+                    const pid = parseInt(pidStr, 10);
+                    if (!isNaN(pid) && pid !== process.pid) {
+                        results.push({ ProcessId: pid, MemoryMB: 0 });
+                    }
+                }
+            } catch (e) {}
         }
     } catch (e) {}
     return results;
