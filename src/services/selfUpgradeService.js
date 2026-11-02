@@ -274,6 +274,26 @@ class SelfUpgradeService {
         }
 
         this.save();
+
+        // If changes were applied successfully, schedule an automatic background restart
+        // so the running Node.js process picks up the new code without manual intervention.
+        if (applied.length > 0) {
+            setTimeout(() => {
+                try {
+                    const ctlScript = path.join(this.workspaceService.rootDir, 'scripts', 'ctl.js');
+                    if (fs.existsSync(ctlScript)) {
+                        const child = exec(`node "${ctlScript}" restart bg`, {
+                            cwd: this.workspaceService.rootDir,
+                            windowsHide: true
+                        });
+                        logger.info(`SelfUpgradeService: Scheduled background bot restart to activate upgraded code.`);
+                    }
+                } catch (restartErr) {
+                    logger.warn(`SelfUpgradeService: Auto-restart attempt warning: ${restartErr.message}`);
+                }
+            }, 2500);
+        }
+
         return {
             success: applied.length > 0,
             applied,
@@ -315,3 +335,4 @@ class SelfUpgradeService {
 }
 
 module.exports = SelfUpgradeService;
+

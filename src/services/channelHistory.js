@@ -25,6 +25,13 @@ class ChannelHistoryService {
 
         const text = query.toLowerCase();
 
+        const getChannels = (g) => {
+            if (!g || !g.channels?.cache) return [];
+            return typeof g.channels.cache.values === 'function'
+                ? Array.from(g.channels.cache.values())
+                : [];
+        };
+
         // 1. Explicit channel mention: <#123456789...> or raw 17-20 digit ID
         const mentionMatch = text.match(/<#(\d+)>/) || text.match(/\b(\d{17,20})\b/);
         if (mentionMatch) {
@@ -35,9 +42,10 @@ class ChannelHistoryService {
             // Check if the ID is a Guild (Server) ID
             const guild = this.client.guilds.cache.get(rawId);
             if (guild) {
-                const general = guild.channels.cache.find(c => c.isTextBased() && !c.isVoiceBased() && c.name.toLowerCase().includes('general'));
+                const chList = getChannels(guild);
+                const general = chList.find(c => c.isTextBased() && !c.isVoiceBased() && c.name.toLowerCase().includes('general'));
                 if (general) return general;
-                const firstText = guild.channels.cache.find(c => c.isTextBased() && !c.isVoiceBased());
+                const firstText = chList.find(c => c.isTextBased() && !c.isVoiceBased());
                 if (firstText) return firstText;
             }
         }
@@ -45,26 +53,33 @@ class ChannelHistoryService {
         // 2. Check if a connected server name is mentioned in the query
         for (const [, guild] of this.client.guilds.cache) {
             const guildLower = guild.name.toLowerCase();
-            // e.g. "banorant" matches "BANORANTTT"
-            if (text.includes(guildLower) || (guildLower.length >= 4 && text.includes(guildLower.slice(0, 5)))) {
+            // e.g. "banorant" matches "BANORANTTT", "col" matches "col"
+            const isMatch = text.includes(guildLower) ||
+                guildLower.includes(text) ||
+                (guildLower.length >= 4 && text.includes(guildLower.slice(0, Math.min(5, guildLower.length)))) ||
+                (text.length >= 4 && guildLower.includes(text.slice(0, Math.min(5, text.length))));
+
+            if (isMatch) {
+                const chList = getChannels(guild);
                 // Find a channel in this guild mentioned in the query
-                for (const [, ch] of guild.channels.cache) {
-                    if (ch.isTextBased() && !ch.isVoiceBased() && text.includes(ch.name.toLowerCase())) {
+                for (const ch of chList) {
+                    if (ch.isTextBased() && !ch.isVoiceBased() && (text.includes(ch.name.toLowerCase()) || text.includes('#' + ch.name.toLowerCase()))) {
                         return ch;
                     }
                 }
                 // Fallback to #general or first readable text channel in this guild
-                const general = guild.channels.cache.find(c => c.isTextBased() && !c.isVoiceBased() && c.name.toLowerCase().includes('general'));
+                const general = chList.find(c => c.isTextBased() && !c.isVoiceBased() && c.name.toLowerCase().includes('general'));
                 if (general) return general;
 
-                const firstText = guild.channels.cache.find(c => c.isTextBased() && !c.isVoiceBased());
+                const firstText = chList.find(c => c.isTextBased() && !c.isVoiceBased());
                 if (firstText) return firstText;
             }
         }
 
         // 3. Check if any channel name matches across any guild
         for (const [, guild] of this.client.guilds.cache) {
-            for (const [, ch] of guild.channels.cache) {
+            const chList = getChannels(guild);
+            for (const ch of chList) {
                 if (ch.isTextBased() && !ch.isVoiceBased()) {
                     const chName = ch.name.toLowerCase();
                     if (text.includes(chName) || text.includes('#' + chName)) {

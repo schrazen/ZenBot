@@ -62,6 +62,10 @@ class CommandHandler {
         switch (cmd) {
             case 'help':
                 return await this.cmdHelp(message);
+            case 'post':
+            case 'send':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can post to Discord channels through ZenBot.');
+                return await this.cmdPost(message, args, argText);
             case 'status':
                 return await this.cmdStatus(message);
             case 'limits':
@@ -2558,6 +2562,75 @@ class CommandHandler {
         }
         const names = res.rejected.map(p => `\`${p.filePath}\` (\`${p.id}\`)`).join(', ');
         return await message.reply(`🛑 Rejected and discarded pending self-upgrade proposal(s): ${names}`);
+    }
+
+    async cmdPost(message, args, argText) {
+        if (!argText || args.length === 0) {
+            return await message.reply(
+                '**Usage:** `!post <server or channel> <message>`\n' +
+                '**Examples:**\n' +
+                '• `!post banorant #general Hello everyone!`\n' +
+                '• `!post banorant Hello Banorant server!` *(defaults to #general)*\n' +
+                '• `!post #testing Hello testing channel`\n' +
+                '• `!post 1484106877708013608 Alert from Lance`'
+            );
+        }
+
+        let targetChannel = null;
+        let messageBody = '';
+
+        // Check if first 2 tokens specify a guild + channel (e.g. "banorant #general" or "col testing")
+        if (args.length >= 2 && this.channelHistory && this.client?.guilds?.cache) {
+            const firstGuild = Array.from(this.client.guilds.cache.values()).find(g => {
+                const gLow = g.name.toLowerCase();
+                const aLow = args[0].toLowerCase();
+                return gLow.includes(aLow) || aLow.includes(gLow) ||
+                    (gLow.length >= 4 && aLow.includes(gLow.slice(0, Math.min(4, gLow.length))));
+            });
+
+            if (firstGuild && firstGuild.channels?.cache) {
+                const rawChName = args[1].toLowerCase().replace(/^#/, '');
+                const chValues = typeof firstGuild.channels.cache.values === 'function'
+                    ? Array.from(firstGuild.channels.cache.values())
+                    : [];
+                const matchingCh = chValues.find(c => c.isTextBased() && !c.isVoiceBased() && c.name.toLowerCase() === rawChName);
+                if (matchingCh) {
+                    targetChannel = matchingCh;
+                    messageBody = args.slice(2).join(' ').trim();
+                }
+            }
+        }
+
+        // Check if first token alone is the target (e.g. "banorant", "#general", or raw channel/guild ID)
+        if (!targetChannel && args.length >= 1 && this.channelHistory) {
+            const oneTokenTarget = args[0];
+            const chCandidate = this.channelHistory.resolveTargetChannel(oneTokenTarget);
+            if (chCandidate) {
+                targetChannel = chCandidate;
+                messageBody = args.slice(1).join(' ').trim();
+            }
+        }
+
+        if (!targetChannel) {
+            return await message.reply(
+                `Could not find a channel matching \`${args[0]}\`.\n` +
+                `Connected servers: **BANORANTTT** (1484106877708013608), **col** (873791689939107861), **rodericks** (1422544961597083712).`
+            );
+        }
+
+        if (!messageBody) {
+            const serverName = targetChannel.guild ? targetChannel.guild.name : 'Direct Messages';
+            return await message.reply(`Target channel resolved to **#${targetChannel.name}** in **${serverName}**, but no message content was provided! Usage: \`!post ${args[0]} <your message>\``);
+        }
+
+        try {
+            await targetChannel.send(messageBody);
+            const serverName = targetChannel.guild ? targetChannel.guild.name : 'Direct Messages';
+            return await message.reply(`✅ Sent to **#${targetChannel.name}** in **${serverName}**:\n> ${messageBody.slice(0, 150)}${messageBody.length > 150 ? '...' : ''}`);
+        } catch (err) {
+            logger.error(`Failed to post message to #${targetChannel.name}: ${err.message}`);
+            return await message.reply(`❌ Failed to send message to #${targetChannel.name}: ${err.message}`);
+        }
     }
 }
 

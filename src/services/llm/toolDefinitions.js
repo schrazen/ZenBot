@@ -127,6 +127,24 @@ const toolSpecs = [
         }
     },
     {
+        name: 'post_discord_message',
+        description: 'Send/post a message to a channel in any connected Discord server (e.g. "BANORANTTT", "col", "rodericks", a channel name like "#general", or a channel/server ID). Only Lance is authorized to send messages through the bot.',
+        parameters: {
+            type: 'object',
+            properties: {
+                target: {
+                    type: 'string',
+                    description: 'Target server or channel name (e.g. "banorant #general", "BANORANTTT", "col", "#general") or channel/server ID.'
+                },
+                message: {
+                    type: 'string',
+                    description: 'The exact text message to post to the Discord channel.'
+                }
+            },
+            required: ['target', 'message']
+        }
+    },
+    {
         name: 'list_directory',
         description: 'List files and directories inside the project workspace.',
         parameters: {
@@ -454,6 +472,28 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
                     channelId: targetCh.id,
                     messageCount: data.messageCount,
                     transcript: data.transcript || '(No recent messages)'
+                };
+            }
+
+            case 'post_discord_message': {
+                if (!channelHistory) return { error: 'ChannelHistoryService is not available.' };
+                if (!args.message || !args.message.trim()) {
+                    return { error: 'Message content cannot be empty.' };
+                }
+                const targetCh = channelHistory.resolveTargetChannel(args.target || '');
+                if (!targetCh) {
+                    return { error: `Could not find a readable text channel matching "${args.target}". Connected servers: col (873791689939107861), rodericks (1422544961597083712), BANORANTTT (1484106877708013608).` };
+                }
+                if (!targetCh.isTextBased()) {
+                    return { error: `Channel "${targetCh.name}" is not text-based.` };
+                }
+                const sent = await targetCh.send(args.message.trim());
+                return {
+                    success: true,
+                    messageId: sent.id,
+                    server: targetCh.guild?.name || 'Direct Messages',
+                    channel: `#${targetCh.name || 'channel'}`,
+                    content: args.message.trim()
                 };
             }
 
