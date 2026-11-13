@@ -41,7 +41,7 @@ class ZenBot {
 
         this.llmManager = new LLMManager(this.config);
         this.memoryManager = new MemoryManager(this.config);
-        this.channelHistory = new ChannelHistoryService(this.client);
+        this.channelHistory = new ChannelHistoryService(this.client, this.config);
         this.ownerAvailability = new OwnerAvailabilityService({
             config: this.config,
             client: this.client
@@ -54,7 +54,8 @@ class ZenBot {
             config: this.config
         });
         this.workspaceService = new WorkspaceService({
-            rootDir: this.config.paths.root
+            rootDir: this.config.paths.root,
+            vaultDirs: this.config.paths.vaultPaths
         });
         this.selfUpgradeService = new SelfUpgradeService({
             config: this.config,
@@ -72,6 +73,10 @@ class ZenBot {
             workspaceService: this.workspaceService,
             webSearchService: this.webSearchService,
             reminderService: this.reminderService,
+            selfUpgradeService: this.selfUpgradeService,
+            channelHistory: this.channelHistory,
+            automationService: this.automationService,
+            ownerAvailability: this.ownerAvailability,
             memoryManager: this.memoryManager,
             client: this.client
         });
@@ -83,9 +88,12 @@ class ZenBot {
             memoryManager: this.memoryManager,
             selfUpgradeService: this.selfUpgradeService,
             channelHistory: this.channelHistory,
+            reminderService: this.reminderService,
+            ownerAvailability: this.ownerAvailability,
             client: this.client,
             storagePath: this.config.paths.automations
         });
+        this.goalService.automationService = this.automationService;
         this.messageQueueService = new MessageQueueService(1800);
 
         this.commandHandler = new CommandHandler({
@@ -156,6 +164,7 @@ class ZenBot {
 
         this.client.on('messageCreate', async (message) => {
             try {
+                if (message.author?.bot) return;
                 this.messageQueueService.enqueue(message, async (finalMsg) => {
                     await this.messageHandler.handle(finalMsg);
                 });

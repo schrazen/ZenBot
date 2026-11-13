@@ -60,6 +60,25 @@ class ProjectStore {
         return project;
     }
 
+    completeTask(projectIdOrName, taskQuery) {
+        const project = this.find(projectIdOrName);
+        if (!project || !Array.isArray(project.tasks)) return { project: null, removed: null };
+
+        const q = (taskQuery || '').trim().toLowerCase();
+        let idx = -1;
+        if (/^\d+$/.test(q)) {
+            const num = parseInt(q, 10) - 1;
+            if (num >= 0 && num < project.tasks.length) idx = num;
+        } else {
+            idx = project.tasks.findIndex(t => t.toLowerCase().includes(q));
+        }
+
+        if (idx === -1) return { project, removed: null };
+        const [removed] = project.tasks.splice(idx, 1);
+        this._save(this.projects);
+        return { project, removed };
+    }
+
     /**
      * Detects if any tracked project is referenced in a query.
      */

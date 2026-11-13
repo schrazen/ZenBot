@@ -381,6 +381,10 @@ class MessageHandler {
             : null;
         if (learnedPref) {
             this.memoryManager.preferences.addPreference(learnedPref.rule, learnedPref.category, 'feedback');
+            if (learnedPref.humorLevel !== undefined && this.config?.persona) {
+                this.config.persona.humorIntensity = learnedPref.humorLevel;
+                logger.info(`Updated live humorIntensity to ${learnedPref.humorLevel} from owner feedback.`);
+            }
         }
 
         // Combine referenced message context and user query
@@ -444,7 +448,7 @@ class MessageHandler {
             // In DMs, always enable full agent tools for Lance.
             // In public server channels, only enable agent tools when Lance is asking for a task/action
             // (prevents casual group-chat banter or laughter from accidentally invoking workspace/posting tools).
-            const hasTaskIntentInGuild = isDM || /\b(?:file|code|src|read|write|edit|patch|fix|upgrade|search|find|check|post|send|message|channel|server|banorant|col|rodericks|remind|alarm|schedule|automate|watch|status|available|away|sleep|online|offline|run|cmd|git|web|http|url)\b/i.test(effectiveQuery);
+            const hasTaskIntentInGuild = isDM || /\b(?:file|code|src|read|write|edit|patch|fix|upgrade|search|find|check|post|send|message|channel|server|banorant|col|rodericks|remind|alarm|schedule|automate|watch|status|available|away|sleep|online|offline|run|cmd|git|web|http|url|remember|fact|preference|project|vault|download|document|desktop|pdf|attach|upload)\b/i.test(effectiveQuery);
             const useAgentLoop = isOwner && autonomyEnabled && hasTaskIntentInGuild && (this.workspaceService || this.reminderService);
 
             // Live progress tracker message for multi-step agent operations
@@ -459,7 +463,7 @@ class MessageHandler {
                 } else if (rawArgs && typeof rawArgs === 'object') {
                     parsed = rawArgs;
                 }
-                const detail = parsed.filePath || parsed.query || parsed.target || parsed.url || parsed.command || parsed.state || parsed.task || '';
+                const detail = parsed.filePath || parsed.query || parsed.target || parsed.url || parsed.command || parsed.state || parsed.task || parsed.fact || parsed.rule || parsed.project || '';
                 return detail ? `\`${toolName}\` (${String(detail).slice(0, 50)})` : `\`${toolName}\``;
             };
 
@@ -503,6 +507,7 @@ class MessageHandler {
                     geminiTools,
                     onProgress: updateLiveProgress,
                     executeTool: (name, args) => executeTool(name, args, {
+                        config: this.config,
                         workspaceService: this.workspaceService,
                         selfUpgradeService: this.selfUpgradeService,
                         channelHistory: this.channelHistory,
@@ -510,6 +515,8 @@ class MessageHandler {
                         webSearchService: this.webSearchService,
                         automationService: this.automationService,
                         ownerAvailability: this.ownerAvailability,
+                        memoryManager: this.memoryManager,
+                        client: this.client,
                         userId: message.author.id,
                         channelId: message.channel.id,
                         isDM
@@ -528,8 +535,8 @@ class MessageHandler {
                 progressMsg = null;
             }
 
-            let replyText = response.content;
-            if (response.executedTools && response.executedTools.length > 0) {
+            let replyText = (response.content || '').trim();
+            if (this.showTokens && response.executedTools && response.executedTools.length > 0) {
                 const toolNames = response.executedTools.map(t => `\`${t.name}\``).join(', ');
                 replyText = `*(🛠️ Executed: ${toolNames})*\n\n` + replyText;
             }
@@ -542,13 +549,11 @@ class MessageHandler {
                 replyText = `*(Noted: "${rememberedInline}")*\n\n` + replyText;
             }
 
-            // Append failover notification if any
-            if (response.note) {
-                replyText += `\n\n_${response.note}_`;
-            }
-
-            // Only append token indicator if explicitly enabled by user (default: false)
+            // Only append failover/token indicators if debug token display (`!tokens`) is enabled
             if (this.showTokens) {
+                if (response.note) {
+                    replyText += `\n\n_${response.note}_`;
+                }
                 let statsTag = `\n\n\`[${response.provider} • ${response.model} • ${response.latencyMs}ms`;
                 if (response.usage?.total_tokens) {
                     statsTag += ` | ${response.usage.total_tokens} tokens`;
@@ -558,6 +563,10 @@ class MessageHandler {
                 }
                 statsTag += `]\``;
                 replyText += statsTag;
+            }
+
+            if (!replyText) {
+                replyText = 'Done.';
             }
 
             // Split into Discord-compliant chunks
@@ -602,6 +611,7 @@ class MessageHandler {
                         geminiTools: getGeminiTools(),
                         onProgress: updateLiveProgress,
                         executeTool: (name, args) => executeTool(name, args, {
+                            config: this.config,
                             workspaceService: this.workspaceService,
                             selfUpgradeService: this.selfUpgradeService,
                             channelHistory: this.channelHistory,
@@ -609,6 +619,8 @@ class MessageHandler {
                             webSearchService: this.webSearchService,
                             automationService: this.automationService,
                             ownerAvailability: this.ownerAvailability,
+                            memoryManager: this.memoryManager,
+                            client: this.client,
                             userId: message.author.id,
                             channelId: message.channel.id,
                             isDM
@@ -628,7 +640,7 @@ class MessageHandler {
                 }
 
                 let contText = nextResponse.content || '';
-                if (nextResponse.executedTools && nextResponse.executedTools.length > 0) {
+                if (this.showTokens && nextResponse.executedTools && nextResponse.executedTools.length > 0) {
                     const toolNames = nextResponse.executedTools.map(t => `\`${t.name}\``).join(', ');
                     contText = `*(🛠️ Executed: ${toolNames})*\n\n` + contText;
                 }
@@ -664,10 +676,10 @@ class MessageHandler {
                 }
             }
 
-            // Persist turns to memory
+            // Persist turns to memory with DM vs Guild scope isolation
             const historyUserTurn = isOwner ? userQuery : `${speakerName}: ${userQuery}`;
-            this.memoryManager.recordTurn(message.channel.id, 'user', historyUserTurn);
-            this.memoryManager.recordTurn(message.channel.id, 'assistant', fullAccumulatedReply);
+            this.memoryManager.recordTurn(message.channel.id, 'user', historyUserTurn, { isDM });
+            this.memoryManager.recordTurn(message.channel.id, 'assistant', fullAccumulatedReply, { isDM });
 
             logger.success(`Replied via ${response.provider} (${response.model}) in ${response.latencyMs}ms${continuationCount > 0 ? ` (+${continuationCount} auto-continuation)` : ''}`);
         } catch (error) {

@@ -5,12 +5,16 @@ const logger = require('../utils/logger');
 const { getGroqTools, executeTool } = require('./llm/toolDefinitions');
 
 class GoalService {
-    constructor({ config, llmManager, workspaceService, webSearchService, reminderService, memoryManager, client }) {
+    constructor({ config, llmManager, workspaceService, webSearchService, reminderService, selfUpgradeService, channelHistory, automationService, ownerAvailability, memoryManager, client }) {
         this.config = config;
         this.llmManager = llmManager;
         this.workspaceService = workspaceService;
         this.webSearchService = webSearchService;
         this.reminderService = reminderService;
+        this.selfUpgradeService = selfUpgradeService;
+        this.channelHistory = channelHistory;
+        this.automationService = automationService;
+        this.ownerAvailability = ownerAvailability;
         this.memoryManager = memoryManager;
         this.client = client;
 
@@ -251,11 +255,19 @@ class GoalService {
                 const result = await this.llmManager.chatWithAgent(stepMessages, {
                     tools: groqTools,
                     executeTool: (name, args) => executeTool(name, args, {
+                        config: this.config,
                         workspaceService: this.workspaceService,
                         webSearchService: this.webSearchService,
                         reminderService: this.reminderService,
+                        selfUpgradeService: this.selfUpgradeService,
+                        channelHistory: this.channelHistory,
+                        automationService: this.automationService,
+                        ownerAvailability: this.ownerAvailability,
+                        memoryManager: this.memoryManager,
+                        client: this.client,
                         userId: goal.userId,
-                        channelId: goal.channelId
+                        channelId: goal.channelId,
+                        isDM: true
                     }),
                     maxSteps: 4
                 });

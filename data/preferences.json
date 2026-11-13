@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "id": "pref_formal_mode_default",
+    "rule": "Operate strictly as a formal, professional, and direct personal agent. Do not make jokes, roast files, or use sarcastic banter.",
+    "category": "communication",
+    "source": "owner_feedback",
+    "createdAt": 1794532140000
+  },
+  {
+    "id": "pref_1794535124631_896",
+    "rule": "Only send relevant updates from BANORANTTT server when user is away and not present in the channel, avoid periodic 10-minute updates.",
+    "category": "notification",
+    "source": "agent",
+    "createdAt": 1794535124631
+  }
+]

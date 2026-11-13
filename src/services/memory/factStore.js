@@ -44,6 +44,15 @@ class FactStore {
         const cleanText = factText.trim();
         if (!cleanText) throw new Error('Fact content cannot be empty.');
 
+        // Deduplicate normalized fact text
+        const existing = this.facts.find(f => f.fact.toLowerCase() === cleanText.toLowerCase());
+        if (existing) {
+            if (category) existing.category = category;
+            existing.updatedAt = new Date().toISOString();
+            this._save(this.facts);
+            return existing;
+        }
+
         const entry = {
             id: `fact_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             category: category || this.inferCategory(cleanText),
@@ -100,10 +109,24 @@ class FactStore {
         return scored.slice(0, topK).map(x => x.fact);
     }
 
-    toPromptContext(relevantQuery = '') {
-        if (!relevantQuery || !this.facts.length) return null;
+    toPromptContext(relevantQuery = '', { isDM = false } = {}) {
+        if (!this.facts.length) return null;
 
-        const matching = this.search(relevantQuery, 3);
+        let matching = relevantQuery ? this.search(relevantQuery, 5) : [];
+
+        // In private DMs, always keep core recent facts available even if keyword overlap is low
+        if (isDM && matching.length < 3) {
+            const seenIds = new Set(matching.map(f => f.id));
+            const recent = [...this.facts].reverse();
+            for (const f of recent) {
+                if (!seenIds.has(f.id)) {
+                    matching.push(f);
+                    seenIds.add(f.id);
+                }
+                if (matching.length >= 5) break;
+            }
+        }
+
         if (matching.length === 0) return null;
 
         const bullets = matching.map(f => `- [${f.category}] ${f.fact}`).join('\n');

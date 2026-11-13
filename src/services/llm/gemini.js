@@ -43,14 +43,13 @@ class GeminiProvider {
             }
         }
 
-        // Add explicit brevity and formatting reinforcement for Gemini
+        // Context-appropriate Discord formatting reinforcement for Gemini
         systemParts.push({
             text: (
-                `[CRITICAL DISCORD OUTPUT ENFORCEMENT]\n` +
-                `- You are in a real-time Discord chat. Keep replies short, conversational, and direct (1 to 3 sentences maximum for banter/casual talk).\n` +
-                `- NEVER write multi-paragraph essays, unsolicited advice guides, coaching breakdowns, or "Option 1 / Option 2 / Option 3" lists.\n` +
-                `- If asked to invite friends or teammates to play (e.g. Valorant), call them out directly like a friend in the server; do NOT explain how to invite people.\n` +
-                `- Absolutely ZERO markdown tables.`
+                `[DISCORD OUTPUT FORMATTING]\n` +
+                `- Never use Markdown tables (| Col | Col |) as Discord does not render them; use clean bullet lists instead.\n` +
+                `- When the user asks to list files, show directory contents, or extract document/resume details, provide a complete, well-structured bulleted breakdown.\n` +
+                `- For casual group-chat banter, keep replies concise (1 to 3 sentences).`
             )
         });
 
@@ -111,6 +110,13 @@ class GeminiProvider {
                 if (modelToUse !== this.fallbackModel && (res.status === 404 || res.status === 429 || res.status === 400)) {
                     logger.warn(`Gemini model ${modelToUse} failed (${res.status}). Retrying with fallback ${this.fallbackModel}...`);
                     return await this.chat(messages, { ...options, model: this.fallbackModel });
+                }
+
+                // If fallback also hit 429, pause 2s once and retry primary model
+                if (res.status === 429 && !options._retried429) {
+                    logger.warn(`Gemini fallback ${modelToUse} hit 429. Waiting 2s before single retry...`);
+                    await new Promise(r => setTimeout(r, 2000));
+                    return await this.chat(messages, { ...options, model: this.model, _retried429: true });
                 }
 
                 const errMessage = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;

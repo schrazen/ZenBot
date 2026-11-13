@@ -169,7 +169,9 @@ class SelfUpgradeService {
     }
 
     /**
-     * Runs `node --check` on a JS file to guarantee syntax validity.
+     * Runs `node --check` AND a safe pre-flight `require()` load test on JS modules
+     * inside `src/` (excluding entrypoints `index.js` / `src/bot.js`) so missing imports
+     * or boot-time ReferenceErrors are caught and rolled back before restarting.
      */
     verifySyntax(fullPath) {
         if (!fullPath.endsWith('.js')) return Promise.resolve({ valid: true });
@@ -177,13 +179,33 @@ class SelfUpgradeService {
         return new Promise((resolve) => {
             exec(`node --check "${fullPath}"`, { cwd: this.workspaceService.rootDir, timeout: 10000 }, (error, stdout, stderr) => {
                 if (error) {
-                    resolve({
+                    return resolve({
                         valid: false,
                         error: (stderr || error.message || 'Syntax check failed').trim()
                     });
-                } else {
-                    resolve({ valid: true });
                 }
+
+                const relPath = path.relative(this.workspaceService.rootDir, fullPath).replace(/\\/g, '/');
+                const skipRequireTest = relPath === 'index.js' || relPath === 'src/bot.js' || !relPath.startsWith('src/');
+                if (skipRequireTest) {
+                    return resolve({ valid: true });
+                }
+
+                const { execFile } = require('child_process');
+                execFile(
+                    process.execPath,
+                    ['-e', 'require(process.argv[1]);', fullPath],
+                    { cwd: this.workspaceService.rootDir, timeout: 5000 },
+                    (reqErr, reqStdout, reqStderr) => {
+                        if (reqErr) {
+                            return resolve({
+                                valid: false,
+                                error: `Module load check failed: ${(reqStderr || reqErr.message || 'Unknown load error').trim().slice(0, 400)}`
+                            });
+                        }
+                        return resolve({ valid: true });
+                    }
+                );
             });
         });
     }

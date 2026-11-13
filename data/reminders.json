@@ -1,1 +1,14 @@
-[]
+[
+  {
+    "id": "rem_1793460163604_317",
+    "userId": "871274613227798589",
+    "channelId": "1484106878178033665",
+    "isDM": false,
+    "task": "Reminder for Lance",
+    "dueAt": 1793462340000,
+    "dueTimeStr": "11:59 PM",
+    "createdAt": 1793460163604,
+    "repeat": null,
+    "completed": true
+  }
+]

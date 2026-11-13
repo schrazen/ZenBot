@@ -1,1 +1,88 @@
-[]
+[
+  {
+    "id": "auto_1792808472774_236",
+    "name": "PasigRainWatcher",
+    "scheduleStr": "Every 30 m",
+    "scheduleMeta": {
+      "type": "interval",
+      "intervalMs": 1800000,
+      "nextRun": 1794537359933,
+      "formatted": "Every 30 m"
+    },
+    "actionType": "agent_task",
+    "prompt": "Fetch https://wttr.in/Pasig?format=%C. If the output contains any form of rain (e.g., 'Rain', 'Light rain', 'Heavy rain', 'Showers'), send a DM to Lance (schrazen) notifying that rain is forecasted.",
+    "url": null,
+    "userId": "871274613227798589",
+    "channelId": "1549914531948400720",
+    "isDM": true,
+    "active": true,
+    "createdAt": 1792808472774,
+    "lastRun": 1794535559933,
+    "lastStatus": "checked_no_alert",
+    "lastResult": "The fetched weather report for Pasig indicates sunny conditions with no mention of rain or showers.",
+    "runCount": 27,
+    "state": {
+      "channelCursors": {},
+      "lastAlertValue": null,
+      "lastAlertAt": null
+    }
+  },
+  {
+    "id": "auto_1792809945540_61",
+    "name": "Banorant Discord Watcher",
+    "scheduleStr": "Every 10 minutes",
+    "scheduleMeta": {
+      "type": "interval",
+      "intervalMs": 600000,
+      "nextRun": 1794536280389,
+      "formatted": "Every 10 minutes"
+    },
+    "actionType": "agent_task",
+    "prompt": "Check the BANORANTTT server for new messages and notify Lance if anyone posts anything.",
+    "url": "https://discord.com/channels/1484106877708013608",
+    "userId": "871274613227798589",
+    "channelId": "1549914531948400720",
+    "isDM": true,
+    "active": true,
+    "createdAt": 1792809945540,
+    "lastRun": 1794535680389,
+    "lastStatus": "success",
+    "lastResult": "New activity was detected in **BANORANTTT**:\n\n- **09:58 AM** – Hit: solid setup\n- **09:58 AM`** – Hit: tang ina [1 attachment(s)]\n- **09:58 AM** – Hit: parang nasa luamng arcade ako\n- **09:59 AM** – \ud835",
+    "runCount": 73,
+    "state": {
+      "channelCursors": {
+        "1484106878178033665": "1570620857586294887"
+      },
+      "lastAlertValue": "new activity was detected in **banoranttt**:\n\n- **09:58 am** – hit: solid setup\n- **09:58 am`** – hit: tang ina [1 attachment(s)]\n- **09:58 am** – hit: parang nasa luamng arcade ako\n- **09:59 am** – 𝘻𝘦𝘯: amazing\n- **09:59 am** – 𝘻𝘦𝘯: okay na?\n- **10:00 am** – hit: [2 attachment(s)]\n- **10:00 a",
+      "lastAlertAt": 1794535679852
+    }
+  },
+  {
+    "id": "auto_1794534271226_528",
+    "name": "Pasig Rain Monitor",
+    "scheduleStr": "Every 1 hour",
+    "scheduleMeta": {
+      "type": "interval",
+      "intervalMs": 3600000,
+      "nextRun": 1794537871226,
+      "formatted": "Every 1 hour"
+    },
+    "actionType": "agent_task",
+    "prompt": "Check Pasig weather for rain probability",
+    "url": "https://wttr.in/Pasig?format=1",
+    "userId": "871274613227798589",
+    "channelId": "1549914531948400720",
+    "isDM": true,
+    "active": true,
+    "createdAt": 1794534271226,
+    "lastRun": null,
+    "lastStatus": "pending",
+    "lastResult": null,
+    "runCount": 0,
+    "state": {
+      "channelCursors": {},
+      "lastAlertValue": null,
+      "lastAlertAt": null
+    }
+  }
+]

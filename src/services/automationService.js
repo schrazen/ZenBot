@@ -4,7 +4,7 @@ const { EmbedBuilder } = require('discord.js');
 const logger = require('../utils/logger');
 
 class AutomationService {
-    constructor({ config, llmManager, webSearchService, workspaceService, memoryManager, selfUpgradeService, channelHistory, client, storagePath }) {
+    constructor({ config, llmManager, webSearchService, workspaceService, memoryManager, selfUpgradeService, channelHistory, reminderService, ownerAvailability, client, storagePath }) {
         this.config = config;
         this.llmManager = llmManager;
         this.webSearchService = webSearchService;
@@ -12,6 +12,8 @@ class AutomationService {
         this.memoryManager = memoryManager;
         this.selfUpgradeService = selfUpgradeService;
         this.channelHistory = channelHistory;
+        this.reminderService = reminderService;
+        this.ownerAvailability = ownerAvailability;
         this.client = client;
 
         this.storagePath = storagePath || (config?.paths?.automations
@@ -144,15 +146,42 @@ class AutomationService {
             throw new Error(`Could not parse schedule: "${scheduleStr}". Try "every 1 hour", "every 30m", or "daily at 8am".`);
         }
 
+        const cleanName = name ? name.trim() : (prompt ? prompt.slice(0, 40) : 'Automation');
+        const cleanUrl = url?.trim() || null;
+        const normName = cleanName.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normUrl = cleanUrl ? cleanUrl.toLowerCase().replace(/\/+$/, '').split('?')[0] : null;
+
+        const existing = this.automations.find(a => {
+            if (!a.active) return false;
+            if (userId && a.userId && a.userId !== userId) return false;
+            const existingNormName = (a.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const existingNormUrl = a.url ? a.url.toLowerCase().replace(/\/+$/, '').split('?')[0] : null;
+            if (normName && existingNormName && normName === existingNormName) return true;
+            if (normUrl && existingNormUrl && normUrl === existingNormUrl && a.actionType === actionType) return true;
+            return false;
+        });
+
+        if (existing) {
+            existing.name = cleanName;
+            existing.scheduleStr = parsed.formatted;
+            existing.scheduleMeta = parsed;
+            existing.actionType = actionType;
+            existing.prompt = prompt?.trim() || existing.prompt;
+            if (cleanUrl) existing.url = cleanUrl;
+            this.save();
+            logger.info(`Automation [${existing.id}] updated in place: "${existing.name}" (${existing.scheduleStr})`);
+            return existing;
+        }
+
         const autoId = `auto_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
         const item = {
             id: autoId,
-            name: name ? name.trim() : (prompt ? prompt.slice(0, 40) : 'Automation'),
+            name: cleanName,
             scheduleStr: parsed.formatted,
             scheduleMeta: parsed,
             actionType, // 'web_watch' | 'standup' | 'agent_task' | 'command'
             prompt: prompt?.trim() || '',
-            url: url?.trim() || null,
+            url: cleanUrl,
             userId,
             channelId,
             isDM,
@@ -161,7 +190,12 @@ class AutomationService {
             lastRun: null,
             lastStatus: 'pending',
             lastResult: null,
-            runCount: 0
+            runCount: 0,
+            state: {
+                channelCursors: {},
+                lastAlertValue: null,
+                lastAlertAt: null
+            }
         };
 
         this.automations.push(item);
@@ -272,7 +306,7 @@ class AutomationService {
             .join('\n');
 
         const goals = profile.goals?.slice(0, 3).map(g => `• ${g}`).join('\n') || 'None recorded yet';
-        const pendingReminders = this.config?.reminderService?.listReminders?.(auto.userId)?.slice(0, 3) || [];
+        const pendingReminders = this.reminderService?.listReminders?.(auto.userId)?.slice(0, 3) || [];
 
         const embed = new EmbedBuilder()
             .setTitle(`🌅 Good Morning, Lance! Daily Standup & Focus Plan`)
@@ -316,6 +350,8 @@ class AutomationService {
         const pageText = typeof pageRes === 'string'
             ? pageRes
             : (pageRes.content || pageRes.error || JSON.stringify(pageRes));
+
+        auto.state = auto.state || { channelCursors: {}, lastAlertValue: null, lastAlertAt: null };
         
         // Use fast specialist model (gpt-oss-20b or gemini) to evaluate watcher condition
         const specialist = this.llmManager.getSpecialist('subtask');
@@ -332,7 +368,12 @@ class AutomationService {
             },
             {
                 role: 'user',
-                content: `Target URL: ${targetUrl}\nWatcher Goal: ${auto.prompt}\n\nFetched Live Content:\n"""\n${pageText.slice(0, 3000)}\n"""`
+                content: (
+                    `Target URL: ${targetUrl}\n` +
+                    `Watcher Goal: ${auto.prompt}\n` +
+                    `Previous Check Status: ${auto.lastStatus || 'none'} | Previous Summary: ${auto.lastResult || 'none'}\n\n` +
+                    `Fetched Live Content:\n"""\n${pageText.slice(0, 3000)}\n"""`
+                )
             }
         ];
 
@@ -345,11 +386,23 @@ class AutomationService {
             decision = { shouldAlert: false, summary: res.content.slice(0, 300) };
         }
 
+        // Deduplicate unchanged web alerts within a 3-hour cooldown window
+        const normalizedValue = pageText.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 500);
+        const cooldownMs = 3 * 60 * 60 * 1000;
+        if (decision.shouldAlert && auto.state.lastAlertValue === normalizedValue && auto.state.lastAlertAt && (Date.now() - auto.state.lastAlertAt) < cooldownMs) {
+            logger.info(`Automation [${auto.id}] WebWatcher suppressed duplicate unchanged alert within 3h cooldown.`);
+            auto.lastStatus = 'checked_no_alert';
+            auto.lastResult = `${decision.summary} (unchanged since last alert)`;
+            return;
+        }
+
         auto.lastStatus = decision.shouldAlert ? 'alerted' : 'checked_no_alert';
         auto.lastResult = decision.summary;
         logger.info(`Automation [${auto.id}] WebWatcher result: shouldAlert=${decision.shouldAlert} | ${decision.summary}`);
 
         if (decision.shouldAlert) {
+            auto.state.lastAlertValue = normalizedValue;
+            auto.state.lastAlertAt = Date.now();
             const embed = new EmbedBuilder()
                 .setTitle(`🔔 Autonomous Watcher Alert: ${auto.name}`)
                 .setColor(0xff9f1c)
@@ -367,13 +420,23 @@ class AutomationService {
 
     async _runAgentTask(auto) {
         const { getGroqTools, getGeminiTools, executeTool } = require('./llm/toolDefinitions');
+        auto.state = auto.state || { channelCursors: {}, lastAlertValue: null, lastAlertAt: null };
+        if (!auto.state.channelCursors) auto.state.channelCursors = {};
+        const channelCheckStats = { checkedChannels: 0, totalNewMessages: 0, hadBaselineCursor: false };
+
+        const avail = this.ownerAvailability ? this.ownerAvailability.getAvailabilityState() : { state: 'UNKNOWN', reason: '' };
+        const prefContext = this.memoryManager?.preferences?.toPromptContext() || '';
+
         const res = await this.llmManager.chatWithAgent([
             {
                 role: 'system',
                 content: (
                     'You are ZenBot acting as Lance\'s autonomous background Hermes Agent.\n' +
                     'You HAVE live tools (`fetch_web_page`, `web_search`, `read_discord_channel`, `read_file`, `search_files`, `run_command`, `propose_self_upgrade`). Use them directly to perform the scheduled task.\n' +
-                    '- If this task is a conditional check (e.g. "notify me IF rain is forecasted" or "ping me IF someone messages in Banorant") and the condition is NOT met right now, start your final response with `[NO_ALERT]` so Lance is not spammed.\n' +
+                    `[OWNER LIVE AVAILABILITY]: ${avail.state} (${avail.reason || 'auto-detected'})\n` +
+                    `[PREVIOUS RUN CONTEXT]: Last Run Status: ${auto.lastStatus || 'never'} | Last Result: "${auto.lastResult || 'none'}". Only alert if there is NEW activity or a NEW condition since the last run.\n` +
+                    (prefContext ? `${prefContext}\n` : '') +
+                    '- If this task is a conditional check (e.g. "notify me IF rain is forecasted" or "ping me IF someone messages in Banorant") and there are NO new messages from others, Lance is already AVAILABLE/active in the channel, or the condition is NOT met right now, start your final response with `[NO_ALERT]` so Lance is not spammed.\n' +
                     '- If you encounter a bug or missing capability in your own source code (`src/`) that prevents you from doing what Lance asked, inspect the relevant file with `read_file` and call `propose_self_upgrade` so Lance can approve the fix.'
                 )
             },
@@ -385,11 +448,18 @@ class AutomationService {
             tools: getGroqTools(),
             geminiTools: getGeminiTools(),
             executeTool: (name, args) => executeTool(name, args, {
+                config: this.config,
                 workspaceService: this.workspaceService,
                 webSearchService: this.webSearchService,
                 automationService: this,
                 selfUpgradeService: this.selfUpgradeService,
                 channelHistory: this.channelHistory,
+                reminderService: this.reminderService,
+                ownerAvailability: this.ownerAvailability,
+                memoryManager: this.memoryManager,
+                client: this.client,
+                automationState: auto.state,
+                channelCheckStats,
                 userId: auto.userId,
                 channelId: auto.channelId,
                 isDM: true
@@ -399,13 +469,23 @@ class AutomationService {
         });
 
         const content = (res.content || '').trim();
-        const isSilent = content.includes('[NO_ALERT]');
+        let isSilent = content.includes('[NO_ALERT]');
         const cleanSummary = content.replace(/\[NO_ALERT\]/gi, '').trim();
 
         // Check if the background task staged any self-upgrade proposals
         const stagedUpgrades = (res.executedTools || [])
             .filter(t => t.result && t.result.status === 'pending_owner_approval')
             .map(t => t.result.proposalId);
+
+        // Enforce deterministic silence when Discord channel watcher saw a prior cursor and 0 new messages arrived
+        if (channelCheckStats.checkedChannels > 0 && channelCheckStats.hadBaselineCursor && channelCheckStats.totalNewMessages === 0 && stagedUpgrades.length === 0) {
+            isSilent = true;
+        }
+
+        // Prevent duplicate unchanged alert loops on non-channel tasks (e.g. weather API polled via agent_task)
+        if (!isSilent && stagedUpgrades.length === 0 && cleanSummary && auto.state.lastAlertValue === cleanSummary.toLowerCase().slice(0, 300) && auto.state.lastAlertAt && (Date.now() - auto.state.lastAlertAt) < 3 * 60 * 60 * 1000) {
+            isSilent = true;
+        }
 
         if (stagedUpgrades.length > 0 && this.selfUpgradeService) {
             const pendingList = this.selfUpgradeService.getPendingProposals().filter(p => stagedUpgrades.includes(p.id));
@@ -417,11 +497,13 @@ class AutomationService {
 
         if (isSilent && stagedUpgrades.length === 0) {
             auto.lastStatus = 'checked_no_alert';
-            auto.lastResult = cleanSummary.slice(0, 200) || 'Checked; condition not met.';
+            auto.lastResult = cleanSummary.slice(0, 200) || 'Checked; no new updates.';
             logger.info(`Automation [${auto.id}] AgentTask silent check: ${auto.lastResult}`);
             return;
         }
 
+        auto.state.lastAlertValue = cleanSummary.toLowerCase().slice(0, 300);
+        auto.state.lastAlertAt = Date.now();
         auto.lastStatus = 'success';
         auto.lastResult = cleanSummary.slice(0, 200);
 

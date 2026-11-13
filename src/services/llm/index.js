@@ -26,7 +26,25 @@ class LLMManager {
         }
 
         this.currentProviderName = preferred;
+        this.providerCooldownUntil = new Map();
         logger.info(`LLMManager initialized. Active provider: ${this.currentProviderName}`);
+    }
+
+    /**
+     * Rough token count estimator (chars / 3.8) including tool schemas.
+     */
+    estimateTokens(messages, options = {}) {
+        let chars = 0;
+        if (Array.isArray(messages)) {
+            for (const m of messages) {
+                if (typeof m.content === 'string') chars += m.content.length;
+                if (m.tool_calls) chars += JSON.stringify(m.tool_calls).length;
+            }
+        }
+        if (options.tools) {
+            chars += JSON.stringify(options.tools).length;
+        }
+        return Math.ceil(chars / 3.8);
     }
 
     /**
@@ -171,7 +189,7 @@ class LLMManager {
     }
 
     /**
-     * Executes a chat completion with automatic failover.
+     * Executes a chat completion with proactive token/cooldown routing and automatic failover.
      */
     async chat(messages, options = {}) {
         const primaryProvider = this.getCurrentProvider();
@@ -193,11 +211,27 @@ class LLMManager {
         }
 
         const active = this.getCurrentProvider();
+        const geminiProvider = this.providers.get('gemini');
+
+        // Smart pre-routing: If primary is Groq and it's either in 429 cooldown OR request exceeds Groq's 8k TPM budget,
+        // route directly to Gemini (1M TPM) without wasting latency/quota on doomed Groq calls.
+        if (this.currentProviderName === 'groq' && geminiProvider?.isConfigured()) {
+            const cooldownUntil = this.providerCooldownUntil.get('groq') || 0;
+            const estTokens = this.estimateTokens(messages, options);
+            if (Date.now() < cooldownUntil || estTokens > 6800) {
+                return await geminiProvider.chat(messages, options);
+            }
+        }
 
         try {
             return await active.chat(messages, options);
         } catch (primaryError) {
             logger.warn(`Primary provider (${this.currentProviderName}) failed: ${primaryError.message}`);
+
+            // Put Groq on a 35s cooldown whenever it hits 429 rate-limit / TPM saturation
+            if (this.currentProviderName === 'groq' && /(?:429|rate limit|tokens per minute|request too large)/i.test(primaryError.message || '')) {
+                this.providerCooldownUntil.set('groq', Date.now() + 35 * 1000);
+            }
 
             // Find alternate configured provider for failover
             let failoverProvider = null;
@@ -430,10 +464,15 @@ class LLMManager {
                     } catch (e) {}
                 }
 
+                let serializedResult = typeof result === 'string' ? result : JSON.stringify(result);
+                if (serializedResult.length > 6000) {
+                    serializedResult = serializedResult.slice(0, 6000) + '\n...[truncated for context budget]';
+                }
+
                 workingMessages.push({
                     role: 'tool',
                     tool_call_id: call.id,
-                    content: typeof result === 'string' ? result : JSON.stringify(result)
+                    content: serializedResult
                 });
             }
         }
@@ -448,16 +487,43 @@ class LLMManager {
             const cleanSummary = this.extractTextualToolCalls(finalSummary.content || '').cleanContent;
             return {
                 ...finalSummary,
-                content: cleanSummary || finalSummary.content || 'Completed tool execution.',
+                content: cleanSummary || finalSummary.content || this._buildFallbackToolSummary(executedTools),
                 executedTools
             };
         } catch (e) {
+            const fallbackText = (lastResponse?.content && lastResponse.content.trim())
+                ? lastResponse.content.trim()
+                : this._buildFallbackToolSummary(executedTools);
             return {
-                content: lastResponse?.content || 'Agent completed all actions.',
-                executedTools,
-                ...lastResponse
+                ...lastResponse,
+                content: fallbackText,
+                executedTools
             };
         }
+    }
+
+    /**
+     * Produces a safe non-empty summary from executed tool outputs if final LLM synthesis hits a rate limit.
+     */
+    _buildFallbackToolSummary(executedTools = []) {
+        if (!Array.isArray(executedTools) || executedTools.length === 0) {
+            return 'Completed processing, though the final response hit an API rate limit. Please try again in a moment.';
+        }
+        const lastWithResult = [...executedTools].reverse().find(t => t.result && !t.result.error);
+        if (lastWithResult?.result) {
+            const r = lastWithResult.result;
+            if (typeof r.content === 'string' && r.content.trim()) {
+                return `Here is the extracted output from \`${lastWithResult.name}\`:\n\n${r.content.slice(0, 1500)}`;
+            }
+            if (typeof r.stdout === 'string' && r.stdout.trim()) {
+                return `Here is the command output:\n\n${r.stdout.slice(0, 1500)}`;
+            }
+            return `Completed \`${lastWithResult.name}\` (${JSON.stringify(r).slice(0, 500)}).`;
+        }
+        const lastErr = executedTools[executedTools.length - 1]?.result?.error;
+        return lastErr
+            ? `Unable to finish because tool execution encountered an error: ${lastErr}`
+            : 'Reached the tool execution limit before completing a summary.';
     }
 }
 

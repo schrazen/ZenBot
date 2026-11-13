@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const dotenv = require('dotenv');
 
 // Prefer zen.env if it exists, otherwise check .env
@@ -135,7 +136,17 @@ const config = {
         reminders: path.join(rootDir, 'data', 'reminders.json'),
         preferences: path.join(rootDir, 'data', 'preferences.json'),
         goals: path.join(rootDir, 'data', 'goals.json'),
-        automations: path.join(rootDir, 'data', 'automations.json')
+        automations: path.join(rootDir, 'data', 'automations.json'),
+        vaultPaths: (process.env.PERSONAL_VAULT_PATHS
+            ? process.env.PERSONAL_VAULT_PATHS.split(',').map(s => s.trim()).filter(Boolean)
+            : [
+                path.join(os.homedir(), 'Documents'),
+                path.join(os.homedir(), 'Downloads'),
+                path.join(os.homedir(), 'Desktop')
+            ]
+        ).filter(p => {
+            try { return fs.existsSync(p) && fs.statSync(p).isDirectory(); } catch (e) { return false; }
+        })
     },
 
     // Autonomy & Tool Execution
@@ -147,16 +158,29 @@ const config = {
     persona: {
         botName: 'ZenBot',
         userName: 'Lance',
-        humorIntensity: parseInt(process.env.HUMOR_INTENSITY || '2', 10),
+        humorIntensity: parseInt(process.env.HUMOR_INTENSITY || '0', 10),
         humorLevels: HUMOR_LEVELS,
 
         get baseSystemPrompt() {
             return this.getSystemPrompt(this.humorIntensity);
         },
 
-        getSystemPrompt(intensity) {
+        getSystemPrompt(intensity, { isDM = false } = {}) {
             const level = Math.max(0, Math.min(5, isNaN(intensity) ? this.humorIntensity : Number(intensity)));
-            const humor = HUMOR_LEVELS[level] || HUMOR_LEVELS[2];
+            const humor = HUMOR_LEVELS[level] || HUMOR_LEVELS[0];
+
+            // Compact, strictly formal prompt for Level 0 (or DMs at level <= 1) — eliminates meme bloat and saves ~1,800 tokens/turn
+            if (level === 0 || (isDM && level <= 1)) {
+                return (
+                    `You are ZenBot, Lance's formal, reliable, and precise personal AI agent and senior engineering assistant.\n\n` +
+                    `CURRENT MODE: ${humor.label}\n` +
+                    `- Communicate in a clear, respectful, professional, and direct manner.\n` +
+                    `- Zero jokes, zero sarcasm, zero roasting, zero slang, and zero unsolicited commentary about the user's files or lifestyle.\n` +
+                    `- When asked to list files, show directory contents, or extract details from documents (such as a resume or notes), present the information cleanly and accurately using structured bullet points.\n` +
+                    `- Never use Markdown tables (| Col | Col |) in Discord; use structured bullet lists instead.\n` +
+                    `- Use your available tools directly and accurately when asked to inspect files, extract PDF text, send files to DM, manage reminders/automations, or remember preferences.`
+                );
+            }
 
             let prompt = (
                 `You are ZenBot. In private DMs with Lance, you are his senior dev peer and AI companion. ` +

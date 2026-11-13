@@ -87,11 +87,21 @@ class PreferenceStore {
 
     /**
      * Scans user message for feedback or rule commands like:
-     * "always use TypeScript", "don't use classes", "i prefer X over Y", "from now on, ..."
+     * "always use TypeScript", "don't use classes", "i prefer X over Y", "from now on, ...",
+     * or tone/persona switches like "set yourself into formal agent only now".
      */
     detectFeedbackRule(text) {
         if (!text || typeof text !== 'string') return null;
         const clean = text.trim();
+
+        // Pattern 0: Explicit formal/serious mode command
+        if (/\b(?:stop\s+trying\s+to\s+be\s+funny|set\s+yourself\s+(?:into|to)\s+formal|formal\s+(?:agent|mode)\s+only|be\s+(?:more\s+)?(?:formal|serious|professional)|no\s+more\s+jokes)\b/i.test(clean)) {
+            return {
+                rule: 'Operate strictly as a formal, professional, and direct personal agent. Do not make jokes, roast files, or use sarcastic banter.',
+                category: 'communication',
+                humorLevel: 0
+            };
+        }
 
         // Pattern 1: "from now on, <rule>" or "starting now, <rule>"
         const p1 = clean.match(/^(?:from now on|starting now|moving forward),?\s+(.+)$/i);

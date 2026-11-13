@@ -44,9 +44,9 @@ class EpisodicMemory {
     }
 
     /**
-     * Store a new conversation turn into long-term episodic memory.
+     * Store a new conversation turn into long-term episodic memory with scope metadata.
      */
-    add(role, content) {
+    add(role, content, meta = {}) {
         if (!content || !content.trim()) return null;
 
         const cleanContent = content.trim();
@@ -54,10 +54,17 @@ class EpisodicMemory {
             ? cleanContent.slice(0, 800) + '...'
             : cleanContent;
 
+        const isDM = Boolean(meta.isDM);
+        const channelId = meta.channelId || null;
+        const scope = isDM ? 'dm' : (channelId ? 'guild' : 'unknown');
+
         const entry = {
             id: `mem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             role,
             content: storedContent,
+            channelId,
+            isDM,
+            scope,
             ts: Date.now(),
             date: new Date().toISOString()
         };
@@ -74,9 +81,11 @@ class EpisodicMemory {
     }
 
     /**
-     * Hybrid relevance retrieval: keyword frequency + phrase match + recency decay.
+     * Hybrid relevance retrieval with DM/Guild scope isolation:
+     * - In public guild channels (`isDM === false`), strictly exclude private DM memories.
+     * - In private DMs (`isDM === true`), exclude noisy public server banter unless `includeGuild` is set.
      */
-    retrieve(query, topK = 2) {
+    retrieve(query, topK = 2, options = {}) {
         if (!query || !this.memories.length) return [];
 
         const cleanQuery = query.toLowerCase();
@@ -85,8 +94,25 @@ class EpisodicMemory {
 
         const now = Date.now();
         const oneDayMs = 24 * 60 * 60 * 1000;
+        const filterIsDM = options.isDM;
+        const includeGuild = Boolean(options.includeGuild);
 
-        const scored = this.memories.map(entry => {
+        const eligible = this.memories.filter(entry => {
+            if (filterIsDM === false) {
+                // Public channel: never leak private DM conversations
+                if (entry.isDM === true || entry.scope === 'dm') return false;
+                if (options.channelId && entry.channelId && entry.channelId !== options.channelId && !includeGuild) {
+                    return false;
+                }
+            } else if (filterIsDM === true && !includeGuild) {
+                // Private DM: skip tagged guild banter or `[From Name]:` lines
+                if (entry.scope === 'guild') return false;
+                if (/^\[From\s+[^\]]+\]:/i.test(entry.content || '')) return false;
+            }
+            return true;
+        });
+
+        const scored = eligible.map(entry => {
             const text = (entry.content || '').toLowerCase();
             let score = 0;
 
@@ -103,7 +129,14 @@ class EpisodicMemory {
                 }
             }
 
-            // 3. Recency boost (events from last 24h get a minor boost)
+            // 3. Scope affinity boost
+            if (filterIsDM === true && entry.scope === 'dm') {
+                score += 3;
+            } else if (options.channelId && entry.channelId === options.channelId) {
+                score += 2;
+            }
+
+            // 4. Recency boost (events from last 24h get a minor boost)
             const ageDays = (now - entry.ts) / oneDayMs;
             if (ageDays < 7) {
                 score += Math.max(0, 2 - ageDays * 0.2);

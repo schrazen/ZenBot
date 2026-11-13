@@ -3,16 +3,19 @@
  * Strictly restricted to Lance (owner) to safeguard workspace and system integrity.
  */
 
+const fs = require('fs');
+const path = require('path');
+
 const toolSpecs = [
     {
         name: 'read_file',
-        description: 'Read contents of a file inside the project workspace with line numbers. Use this to inspect code, notes, configurations, or logs.',
+        description: 'Read contents of a text file or extract text directly from a PDF (.pdf) inside the project workspace or whitelisted Personal Vaults (Documents, Downloads, Desktop) with line numbers.',
         parameters: {
             type: 'object',
             properties: {
                 filePath: {
                     type: 'string',
-                    description: 'Relative path of the file to read (e.g. "package.json", "src/bot.js", "data/facts.json").'
+                    description: 'Relative workspace path (e.g. "src/bot.js") or vault path (e.g. "Documents/notes.txt", "Downloads/Resume.pdf").'
                 },
                 maxLines: {
                     type: 'integer',
@@ -146,13 +149,13 @@ const toolSpecs = [
     },
     {
         name: 'set_owner_availability',
-        description: 'Update or override Lance\'s availability/AFK status (e.g. when Lance says "my status is active, stop replying to my friends", "I am online", "I am going to sleep", or "I am away for 2 hours").',
+        description: 'Check or update Lance\'s availability/AFK status (use "status" to read current status without changing it; use "online", "away", "sleep", or "auto" to update/override).',
         parameters: {
             type: 'object',
             properties: {
                 state: {
                     type: 'string',
-                    description: 'Target state: "online" (active, do not send AFK replies to friends), "away" (AFK/busy), "sleep" (asleep), or "auto" (automatic detection).'
+                    description: 'Target action/state: "status" (read-only check of current availability), "online" (active, suppress AFK replies), "away" (AFK/busy), "sleep" (asleep), or "auto" (automatic detection).'
                 },
                 reason: {
                     type: 'string',
@@ -164,13 +167,13 @@ const toolSpecs = [
     },
     {
         name: 'list_directory',
-        description: 'List files and directories inside the project workspace.',
+        description: 'List files and directories inside the project workspace or Personal Vaults ("Documents", "Downloads", "Desktop").',
         parameters: {
             type: 'object',
             properties: {
                 dirPath: {
                     type: 'string',
-                    description: 'Relative directory path to inspect (default: ".").'
+                    description: 'Directory path to inspect (e.g. ".", "src", "Downloads", "Documents", "Desktop").'
                 },
                 depth: {
                     type: 'integer',
@@ -181,7 +184,7 @@ const toolSpecs = [
     },
     {
         name: 'search_files',
-        description: 'Search for a string, function name, or keyword across all text files in the project workspace.',
+        description: 'Search for a text string or keyword inside text files in the project workspace or Personal Vaults ("Documents", "Downloads", "Desktop").',
         parameters: {
             type: 'object',
             properties: {
@@ -191,10 +194,139 @@ const toolSpecs = [
                 },
                 dirPath: {
                     type: 'string',
-                    description: 'Directory to start searching from (default: ".").'
+                    description: 'Directory to start searching from (default: ".", or "Documents", "Downloads", "Desktop").'
                 }
             },
             required: ['query']
+        }
+    },
+    {
+        name: 'find_files',
+        description: 'Find files by filename or extension (including PDFs, docs, images, zips, code) across Lance\'s Personal Vaults (Documents, Downloads, Desktop) and the project workspace.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    description: 'Filename keywords or extension to match (e.g. "resume", "pdf", "os lecture").'
+                },
+                location: {
+                    type: 'string',
+                    description: 'Where to search: "all" (default), "vault", "workspace", "Downloads", "Documents", or "Desktop".'
+                }
+            },
+            required: ['query']
+        }
+    },
+    {
+        name: 'send_file_to_owner',
+        description: 'Send/upload a file from Lance\'s PC (workspace or Personal Vault: Documents, Downloads, Desktop) directly to Lance in Discord DM (up to 25 MB). Sensitive files (.env, private keys, browser credentials) are blocked.',
+        parameters: {
+            type: 'object',
+            properties: {
+                filePath: {
+                    type: 'string',
+                    description: 'Path returned by find_files/list_directory (e.g. "Downloads/reviewer.pdf", "Documents/notes.txt").'
+                },
+                caption: {
+                    type: 'string',
+                    description: 'Optional short message to accompany the file attachment.'
+                }
+            },
+            required: ['filePath']
+        }
+    },
+    {
+        name: 'remember_fact',
+        description: 'Save a persistent personal fact, schedule, deadline, reminder note, or key context about Lance to long-term memory (facts.json). Use proactively when Lance shares important information.',
+        parameters: {
+            type: 'object',
+            properties: {
+                fact: {
+                    type: 'string',
+                    description: 'Concise, clear statement of the fact to remember.'
+                },
+                category: {
+                    type: 'string',
+                    description: 'Optional category: "Preference", "Routine/Health", "Work/Tech", "Goal", "Schedule", or "General".'
+                }
+            },
+            required: ['fact']
+        }
+    },
+    {
+        name: 'save_preference',
+        description: 'Save a recurring workflow rule, style preference, or behavioral instruction from Lance (preferences.json) so ZenBot always follows it.',
+        parameters: {
+            type: 'object',
+            properties: {
+                rule: {
+                    type: 'string',
+                    description: 'Clear actionable rule or preference statement.'
+                },
+                category: {
+                    type: 'string',
+                    description: 'Category such as "workflow", "coding_style", "communication", or "preference".'
+                }
+            },
+            required: ['rule']
+        }
+    },
+    {
+        name: 'search_memory',
+        description: 'Search across Lance\'s stored facts, learned preferences, tracked projects, and past conversation memories.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    description: 'Topic, project name, or keyword to look up in memory.'
+                }
+            },
+            required: ['query']
+        }
+    },
+    {
+        name: 'set_persona_mode',
+        description: 'Switch ZenBot\'s live communication mode and humor level (e.g. when Lance asks for formal mode only, serious mode, or playful banter) and persist the preference.',
+        parameters: {
+            type: 'object',
+            properties: {
+                mode: {
+                    type: 'string',
+                    description: 'Target mode: "formal" (level 0, serious professional agent), "casual" (level 1-2), or "humorous" (level 3+).'
+                },
+                humorLevel: {
+                    type: 'integer',
+                    description: 'Explicit humor intensity 0 (formal/serious) to 5 (peak shitpost).'
+                },
+                rule: {
+                    type: 'string',
+                    description: 'Optional communication rule to persist in preferences.'
+                }
+            }
+        }
+    },
+    {
+        name: 'update_project_task',
+        description: 'Add a new task or mark a task completed on one of Lance\'s tracked projects.',
+        parameters: {
+            type: 'object',
+            properties: {
+                project: {
+                    type: 'string',
+                    description: 'Project ID or name (e.g. "zenbot", "balik-belongings", "personal-portfolio").'
+                },
+                task: {
+                    type: 'string',
+                    description: 'The task text (for add) or substring/1-based index (for complete).'
+                },
+                action: {
+                    type: 'string',
+                    description: '"add" (default) or "complete".'
+                }
+            },
+            required: ['project', 'task']
         }
     },
     {
@@ -385,7 +517,7 @@ function getGeminiTools() {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, userId, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { config, workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, memoryManager, client, automationState, channelCheckStats, userId, channelId, isDM = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -483,13 +615,56 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
                 if (!targetCh) {
                     return { error: `Could not find a readable text channel matching "${args.target}". Connected servers: col (873791689939107861), rodericks (1422544961597083712), BANORANTTT (1484106877708013608).` };
                 }
-                const data = await channelHistory.fetchRecentTranscript(targetCh, args.limit || 20);
+
+                const cursorId = args.afterMessageId || automationState?.channelCursors?.[targetCh.id] || null;
+                const ownerIds = ownerAvailability?.getOwnerIds?.()
+                    || config?.discord?.allowedUserIds
+                    || (userId ? [userId] : []);
+                const data = await channelHistory.fetchRecentTranscript(targetCh, args.limit || 20, cursorId, ownerIds);
+
+                if (automationState && data.latestMessageId) {
+                    automationState.channelCursors = automationState.channelCursors || {};
+                    automationState.channelCursors[targetCh.id] = data.latestMessageId;
+                }
+
+                const availState = ownerAvailability ? ownerAvailability.getAvailabilityState() : null;
+                const ownerIsAvailable = availState?.state === 'AVAILABLE';
+                const noOtherUserActivity = Boolean(
+                    automationState &&
+                    cursorId &&
+                    (data.newMessageCount === 0 || data.nonOwnerNewMessageCount === 0 || data.ownerPostedInNewBatch || ownerIsAvailable)
+                );
+
+                if (channelCheckStats) {
+                    channelCheckStats.checkedChannels += 1;
+                    if (cursorId) channelCheckStats.hadBaselineCursor = true;
+                    if (!noOtherUserActivity) {
+                        channelCheckStats.totalNewMessages += (data.nonOwnerNewMessageCount ?? data.newMessageCount ?? 0);
+                    }
+                }
+
+                if (noOtherUserActivity) {
+                    return {
+                        server: data.guildName,
+                        channel: `#${data.channelName}`,
+                        channelId: targetCh.id,
+                        status: 'NO_ALERT_NEEDED',
+                        newMessageCount: 0,
+                        ownerAvailability: availState?.state || 'UNKNOWN',
+                        message: data.ownerPostedInNewBatch || ownerIsAvailable
+                            ? 'Lance is currently active/AVAILABLE or already participating in this channel. Do NOT send a notification; reply starting with [NO_ALERT].'
+                            : 'No new messages from other users in this channel since the last check. Reply starting with [NO_ALERT].'
+                    };
+                }
+
                 return {
                     server: data.guildName,
                     channel: `#${data.channelName}`,
                     channelId: targetCh.id,
                     messageCount: data.messageCount,
-                    transcript: data.transcript || '(No recent messages)'
+                    newMessageCount: data.newMessageCount,
+                    nonOwnerNewMessageCount: data.nonOwnerNewMessageCount,
+                    transcript: (cursorId && data.newMessageCount > 0 ? data.newTranscript : data.transcript) || '(No recent messages)'
                 };
             }
 
@@ -517,7 +692,18 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
 
             case 'set_owner_availability': {
                 if (!ownerAvailability) return { error: 'OwnerAvailabilityService is not available.' };
-                const stateArg = (args.state || 'online').toLowerCase().trim();
+                const stateArg = (args.state || 'status').toLowerCase().trim();
+                if (stateArg === 'status' || stateArg === 'check' || stateArg === 'get' || stateArg === 'current') {
+                    const current = ownerAvailability.getAvailabilityState();
+                    return {
+                        success: true,
+                        readOnly: true,
+                        state: current.state,
+                        confidence: current.confidence,
+                        reason: current.reason,
+                        manualUntil: current.manualUntil || null
+                    };
+                }
                 if (stateArg === 'online' || stateArg === 'available' || stateArg === 'on' || stateArg === 'active') {
                     ownerAvailability.suppressChannel('global', 60 * 60 * 1000);
                     const res = ownerAvailability.setManualState('on', args.reason || 'Active (confirmed by Lance)');
@@ -544,6 +730,128 @@ async function executeTool(name, rawArgs, { workspaceService, reminderService, w
             case 'search_files': {
                 if (!workspaceService) return { error: 'WorkspaceService is not available.' };
                 return await workspaceService.searchFiles(args.query, args.dirPath || args.path || args.file || '.', 20);
+            }
+
+            case 'find_files': {
+                if (!workspaceService) return { error: 'WorkspaceService is not available.' };
+                return await workspaceService.findFilesByName(args.query, args.location || 'all', 25);
+            }
+
+            case 'send_file_to_owner': {
+                if (!workspaceService) return { error: 'WorkspaceService is not available.' };
+                if (!client || !userId) return { error: 'Discord client or owner userId is not available.' };
+
+                const fullPath = workspaceService.resolveReadPath(args.filePath);
+                if (!fs.existsSync(fullPath)) {
+                    return { error: `File not found: "${args.filePath}". Use find_files first to verify the exact path.` };
+                }
+                const stat = fs.statSync(fullPath);
+                if (!stat.isFile()) {
+                    return { error: `"${args.filePath}" is a directory, not a file.` };
+                }
+                const maxBytes = 25 * 1024 * 1024;
+                if (stat.size > maxBytes) {
+                    return { error: `File "${path.basename(fullPath)}" is ${(stat.size / (1024 * 1024)).toFixed(2)} MB, which exceeds Discord's 25 MB upload limit.` };
+                }
+
+                const ownerUser = await client.users.fetch(userId);
+                if (!ownerUser) {
+                    return { error: `Could not fetch Discord user ${userId}.` };
+                }
+
+                const fileName = path.basename(fullPath);
+                await ownerUser.send({
+                    content: args.caption ? `${args.caption}\n📎 \`${fileName}\`` : `📎 **File from your PC:** \`${fileName}\``,
+                    files: [fullPath]
+                });
+
+                return {
+                    success: true,
+                    fileName,
+                    sizeBytes: stat.size,
+                    deliveredToDM: userId
+                };
+            }
+
+            case 'remember_fact': {
+                if (!memoryManager?.facts) return { error: 'FactStore is not available.' };
+                const entry = memoryManager.facts.addFact(args.fact, args.category || null);
+                return {
+                    success: true,
+                    factId: entry.id,
+                    category: entry.category,
+                    fact: entry.fact
+                };
+            }
+
+            case 'save_preference': {
+                if (!memoryManager?.preferences) return { error: 'PreferenceStore is not available.' };
+                const item = memoryManager.preferences.addPreference(args.rule, args.category || 'workflow', 'agent');
+                if (!item) return { error: 'Preference rule is too short or invalid.' };
+                return {
+                    success: true,
+                    preferenceId: item.id,
+                    category: item.category,
+                    rule: item.rule
+                };
+            }
+
+            case 'search_memory': {
+                if (!memoryManager) return { error: 'MemoryManager is not available.' };
+                const q = args.query || '';
+                return {
+                    query: q,
+                    facts: memoryManager.facts?.search(q, 5) || [],
+                    preferences: (memoryManager.preferences?.listPreferences() || []).filter(p => !q || p.rule.toLowerCase().includes(q.toLowerCase())).slice(0, 8),
+                    projects: memoryManager.projects?.getRelevantProjects(q) || [],
+                    episodicMatches: (memoryManager.episodic?.retrieve(q, 5, { isDM: true, includeGuild: true }) || []).map(m => ({
+                        date: m.date,
+                        scope: m.scope || 'unknown',
+                        role: m.role,
+                        excerpt: (m.content || '').slice(0, 220)
+                    }))
+                };
+            }
+
+            case 'set_persona_mode': {
+                const mode = (args.mode || 'formal').toLowerCase().trim();
+                let level = args.humorLevel !== undefined ? parseInt(args.humorLevel, 10) : NaN;
+                if (isNaN(level)) {
+                    if (mode === 'formal' || mode === 'serious' || mode === 'professional') level = 0;
+                    else if (mode === 'casual') level = 1;
+                    else if (mode === 'humorous' || mode === 'playful') level = 3;
+                    else level = 0;
+                }
+                level = Math.max(0, Math.min(5, level));
+                if (config?.persona) {
+                    config.persona.humorIntensity = level;
+                }
+                const ruleText = args.rule || (level === 0
+                    ? 'Operate strictly as a formal, professional, and direct personal agent. Do not make jokes, roast files, or use sarcastic banter.'
+                    : `Operate in ${mode} mode (humor intensity ${level}).`);
+                if (memoryManager?.preferences) {
+                    memoryManager.preferences.addPreference(ruleText, 'communication', 'agent');
+                }
+                return {
+                    success: true,
+                    mode,
+                    humorLevel: level,
+                    ruleSaved: ruleText
+                };
+            }
+
+            case 'update_project_task': {
+                if (!memoryManager?.projects) return { error: 'ProjectStore is not available.' };
+                const action = (args.action || 'add').toLowerCase().trim();
+                if (action === 'complete' || action === 'done' || action === 'remove') {
+                    const res = memoryManager.projects.completeTask(args.project, args.task);
+                    if (!res.project) return { error: `No tracked project found matching "${args.project}".` };
+                    if (!res.removed) return { error: `No matching task found for "${args.task}" on project "${res.project.name}".` };
+                    return { success: true, project: res.project.name, completedTask: res.removed, remainingTasks: res.project.tasks.length };
+                }
+                const updated = memoryManager.projects.addTask(args.project, args.task);
+                if (!updated) return { error: `No tracked project found matching "${args.project}".` };
+                return { success: true, project: updated.name, addedTask: args.task, totalTasks: updated.tasks.length };
             }
 
             case 'run_command': {
