@@ -23,11 +23,19 @@ class MessageHandler {
     }
 
     /**
-     * Checks if the message author is an authorized owner/admin.
+     * Checks if the message author is an authorized owner (fail-closed).
      */
     isOwner(message) {
-        return this.config.discord.allowedUserIds.length === 0 ||
-            this.config.discord.allowedUserIds.includes(message.author.id);
+        const userId = message?.author?.id || (typeof message === 'string' ? message : null);
+        const username = message?.author?.username || null;
+        if (!userId) return false;
+
+        if (this.config?.security?.isAuthorizedOwner) {
+            return this.config.security.isAuthorizedOwner({ userId, username });
+        }
+
+        const allowed = this.config?.discord?.allowedUserIds || [];
+        return allowed.length > 0 && allowed.includes(String(userId));
     }
 
     /**
@@ -579,7 +587,7 @@ class MessageHandler {
 
             if (useAgentLoop) {
                 const { getToolsForQuery, executeTool } = require('../services/llm/toolDefinitions');
-                const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery);
+                const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery, { isDM, isOwner });
 
                 response = await this.llmManager.chatWithAgent(messages, {
                     tools: groqTools,
@@ -597,6 +605,7 @@ class MessageHandler {
                         memoryManager: this.memoryManager,
                         client: this.client,
                         userId: message.author.id,
+                        username: message.author.username,
                         channelId: message.channel.id,
                         isDM
                     }),
@@ -648,31 +657,50 @@ class MessageHandler {
                 replyText = 'Done.';
             }
 
-            // Build quick-send buttons if find_files found files and send_file_to_owner wasn't already invoked
+            // Build interactive Discord buttons (quick file-send buttons + status/availability buttons in DM)
             const replyComponents = [];
-            if (isOwner && Array.isArray(response.executedTools)) {
-                const alreadySentFile = response.executedTools.some(t => t.name === 'send_file_to_owner' && t.result?.success);
-                const findCall = [...response.executedTools].reverse().find(t => t.name === 'find_files' && Array.isArray(t.result?.matches) && t.result.matches.length > 0);
-                if (!alreadySentFile && findCall) {
-                    const row = new ActionRowBuilder();
-                    const seenIds = new Set();
-                    for (const match of findCall.result.matches) {
-                        if (row.components.length >= 4) break;
-                        const matchPath = String(match.path || '');
-                        if (!matchPath || matchPath.length > 85) continue;
-                        const customId = `zen_send_file:${matchPath}`;
-                        if (seenIds.has(customId)) continue;
-                        seenIds.add(customId);
-                        row.addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(customId)
-                                .setLabel(`📎 Send ${match.name || 'file'}`.slice(0, 75))
-                                .setStyle(ButtonStyle.Secondary)
-                        );
+            if (isOwner) {
+                const executed = Array.isArray(response.executedTools) ? response.executedTools : [];
+                const alreadySentFile = executed.some(t => t.name === 'send_file_to_owner' && t.result?.success);
+
+                if (isDM && !alreadySentFile) {
+                    const fileCall = [...executed].reverse().find(t =>
+                        (t.name === 'find_files' && Array.isArray(t.result?.matches) && t.result.matches.length > 0) ||
+                        (t.name === 'list_directory' && Array.isArray(t.result?.entries) && t.result.entries.some(e => e.type === 'file'))
+                    );
+                    const fileItems = fileCall?.name === 'find_files'
+                        ? fileCall.result.matches
+                        : (fileCall?.result?.entries || []).filter(e => e.type === 'file');
+
+                    const sendableItems = fileItems.filter(f => f.sendableToDiscord !== false);
+                    if (sendableItems.length > 0) {
+                        const fileRow = new ActionRowBuilder();
+                        const seenIds = new Set();
+                        for (const item of sendableItems) {
+                            if (fileRow.components.length >= 4) break;
+                            const matchPath = String(item.path || '').replace(/\\/g, '/');
+                            if (!matchPath || matchPath.length > 85) continue;
+                            const customId = `zen_send_file:${matchPath}`;
+                            if (seenIds.has(customId)) continue;
+                            seenIds.add(customId);
+                            fileRow.addComponents(
+                                new ButtonBuilder()
+                                    .setCustomId(customId)
+                                    .setLabel(`Send ${item.name || 'file'}`.slice(0, 75))
+                                    .setEmoji('📎')
+                                    .setStyle(ButtonStyle.Secondary)
+                            );
+                        }
+                        if (fileRow.components.length > 0) {
+                            replyComponents.push(fileRow);
+                        }
                     }
-                    if (row.components.length > 0) {
-                        replyComponents.push(row);
-                    }
+                }
+
+                const askedStatusOrButtons = isDM && /\b(?:status|availability|afk|online|sleep|button|buttons|ui)\b/i.test(effectiveQuery);
+                const ranAvailTool = executed.some(t => t.name === 'set_owner_availability');
+                if ((askedStatusOrButtons || ranAvailTool) && this.ownerAvailability?.buildStatusComponents) {
+                    replyComponents.push(...this.ownerAvailability.buildStatusComponents());
                 }
             }
 
@@ -718,7 +746,7 @@ class MessageHandler {
                 let nextResponse;
                 if (useAgentLoop) {
                     const { getToolsForQuery, executeTool } = require('../services/llm/toolDefinitions');
-                    const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery);
+                    const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery, { isDM, isOwner });
                     nextResponse = await this.llmManager.chatWithAgent(continuationMessages, {
                         tools: groqTools,
                         geminiTools,
@@ -735,6 +763,7 @@ class MessageHandler {
                             memoryManager: this.memoryManager,
                             client: this.client,
                             userId: message.author.id,
+                            username: message.author.username,
                             channelId: message.channel.id,
                             isDM
                         }),

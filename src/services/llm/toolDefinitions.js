@@ -5,6 +5,20 @@
 
 const fs = require('fs');
 const path = require('path');
+const defaultConfig = require('../../config');
+const logger = require('../../utils/logger');
+
+const HIGH_SECURITY_TOOLS = new Set([
+    'read_file',
+    'write_file',
+    'edit_file',
+    'propose_self_upgrade',
+    'list_directory',
+    'search_files',
+    'find_files',
+    'send_file_to_owner',
+    'run_command'
+]);
 
 const toolSpecs = [
     {
@@ -202,13 +216,13 @@ const toolSpecs = [
     },
     {
         name: 'find_files',
-        description: 'Find files by filename or extension (including PDFs, docs, images, zips, code) across Lance\'s Personal Vaults (Documents, Downloads, Desktop) and the project workspace.',
+        description: 'Find files by filename, extension, category ("image", "video", "audio", "document"), or wildcard ("random", "*", "all") across Lance\'s Personal Vaults (Documents, Downloads, Desktop) and the project workspace. Annotates files with sendableToDiscord (<= 25 MB).',
         parameters: {
             type: 'object',
             properties: {
                 query: {
                     type: 'string',
-                    description: 'Filename keywords or extension to match (e.g. "resume", "pdf", "os lecture").'
+                    description: 'Filename keywords, extension, category ("image", "video", "document"), or "random" / "*" for any file.'
                 },
                 location: {
                     type: 'string',
@@ -469,7 +483,7 @@ const toolSpecs = [
     },
     {
         name: 'unlock_tools',
-        description: 'Unlock additional tool categories for this turn if a tool you need is not yet in your active list. Categories: "files", "code_edit", "discord", "memory", "web", "scheduling", or "all".',
+        description: 'Unlock additional tool categories ONLY when a tool you need is missing from your active list (never call this if you already have the needed tool). Categories: "files", "code_edit", "discord", "memory", "web", "scheduling", or "all".',
         parameters: {
             type: 'object',
             properties: {
@@ -501,20 +515,35 @@ function _filterSpecs(allowedNames = null) {
 /**
  * Infers the minimal relevant subset of tools for a given user query / task prompt.
  * Always keeps core proactive memory tools + `unlock_tools` so the agent can expand if needed.
+ * Enforces VAULT_REQUIRE_DM_ONLY by withholding file/shell tools in non-DM channels.
  */
-function inferToolNamesForQuery(query = '', extraCategories = []) {
+function inferToolNamesForQuery(query = '', optionsOrExtras = []) {
     const text = String(query || '').toLowerCase();
+    const isArrayExtras = Array.isArray(optionsOrExtras) || typeof optionsOrExtras === 'string';
+    const opts = isArrayExtras ? { extraCategories: optionsOrExtras } : (optionsOrExtras || {});
+    const extraCategories = opts.extraCategories || [];
+    const isDM = opts.isDM !== undefined ? Boolean(opts.isDM) : true;
+    const isOwner = opts.isOwner !== undefined ? Boolean(opts.isOwner) : true;
+    const dmLockActive = Boolean(defaultConfig.security?.requireDmOnly && !isDM);
+
     const names = new Set(['remember_fact', 'save_preference', 'unlock_tools']);
     const extras = Array.isArray(extraCategories) ? extraCategories : [extraCategories];
 
-    if (extras.includes('all')) {
-        return toolSpecs.map(s => s.name);
-    }
-
     const addCategory = (cat) => {
+        if ((cat === 'files' || cat === 'code_edit') && (dmLockActive || !isOwner)) {
+            return;
+        }
         const list = TOOL_CATEGORIES[cat];
         if (list) list.forEach(n => names.add(n));
     };
+
+    if (extras.includes('all')) {
+        for (const s of toolSpecs) {
+            if ((dmLockActive || !isOwner) && HIGH_SECURITY_TOOLS.has(s.name)) continue;
+            names.add(s.name);
+        }
+        return Array.from(names);
+    }
 
     for (const cat of extras) {
         addCategory(cat);
@@ -522,7 +551,7 @@ function inferToolNamesForQuery(query = '', extraCategories = []) {
 
     let matchedAny = false;
 
-    if (/\b(?:file|files|folder|dir|directory|downloads?|documents?|desktop|pdf|resume|cv|reviewer|notes?|txt|md|read|find|search|send\s+me|upload|attach|extract|contain|inside)\b/i.test(text)) {
+    if (/\b(?:file|files|folder|dir|directory|downloads?|documents?|desktop|pdf|resume|cv|reviewer|notes?|txt|md|read|find|search|send|image|images|photo|photos|picture|pictures|screenshot|screenshots|png|jpg|jpeg|webp|gif|video|mp4|audio|mp3|doc|docx|xls|ppt|zip|random|anything|show|list|open|get|pull|upload|attach|extract|contain|inside)\b/i.test(text)) {
         addCategory('files');
         matchedAny = true;
     }
@@ -532,7 +561,7 @@ function inferToolNamesForQuery(query = '', extraCategories = []) {
         matchedAny = true;
     }
 
-    if (/\b(?:discord|server|channel|banorant|banoranttt|rodericks|col|chat|messages?|recap|catch\s*up|summariz|post|reply|friends?|status|avail|availability|online|offline|away|afk|sleep|mute)\b/i.test(text)) {
+    if (/\b(?:discord|server|channel|banorant|banoranttt|rodericks|col|chat|messages?|recap|catch\s*up|summariz|post|reply|friends?|status|avail|availability|online|offline|away|afk|sleep|mute|button|buttons|ui)\b/i.test(text)) {
         addCategory('discord');
         matchedAny = true;
     }
@@ -566,8 +595,8 @@ function inferToolNamesForQuery(query = '', extraCategories = []) {
 /**
  * Returns formatted Groq + Gemini tool arrays scoped to the inferred intent.
  */
-function getToolsForQuery(query = '', extraCategories = []) {
-    const toolNames = inferToolNamesForQuery(query, extraCategories);
+function getToolsForQuery(query = '', optionsOrExtras = []) {
+    const toolNames = inferToolNamesForQuery(query, optionsOrExtras);
     return {
         toolNames,
         groqTools: getGroqTools(toolNames),
@@ -623,7 +652,7 @@ function getGeminiTools(allowedNames = null) {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { config, workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, memoryManager, client, automationState, channelCheckStats, userId, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { config, workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, memoryManager, client, automationState, channelCheckStats, userId, username, channelId, isDM = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -633,6 +662,29 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
         }
     }
     args = args || {};
+
+    const secConfig = (config && config.security) ? config : defaultConfig;
+
+    // Multi-factor High-Security Vault Lock on all file, vault, code, upload, and command tools
+    if (HIGH_SECURITY_TOOLS.has(name)) {
+        let resolvedUsername = username;
+        if (!resolvedUsername && client?.users && userId) {
+            try {
+                const fetched = client.users.cache?.get(userId) || await client.users.fetch(userId);
+                resolvedUsername = fetched?.username || '';
+            } catch (e) {}
+        }
+
+        const access = secConfig.security.verifyFileAccess({
+            userId,
+            username: resolvedUsername,
+            isDM
+        });
+        if (!access.allowed) {
+            logger.warn(`[SECURITY BLOCK] Denied ${name} for userId=${userId || 'unknown'} username=${resolvedUsername || 'unknown'} isDM=${isDM}: ${access.reason}`);
+            return { error: `🔒 High-Security Vault Lock: ${access.reason}` };
+        }
+    }
 
     try {
         switch (name) {
@@ -864,6 +916,10 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
                 if (!ownerUser) {
                     return { error: `Could not fetch Discord user ${userId}.` };
                 }
+                if (!secConfig.security.isAuthorizedOwner({ userId: ownerUser.id, username: ownerUser.username })) {
+                    logger.warn(`[SECURITY BLOCK] Recipient mismatch on send_file_to_owner: id=${ownerUser.id}, username=${ownerUser.username}`);
+                    return { error: `🔒 High-Security Vault Lock: Recipient account (${ownerUser.username} / ${ownerUser.id}) failed owner verification.` };
+                }
 
                 const fileName = path.basename(fullPath);
                 await ownerUser.send({
@@ -1057,11 +1113,16 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
                     .split(/[,\s]+/)
                     .map(s => s.trim())
                     .filter(Boolean);
+                const dmLockActive = Boolean(secConfig.security?.requireDmOnly && !isDM);
                 const unlockedSet = new Set();
                 if (rawCats.includes('all')) {
-                    toolSpecs.forEach(s => unlockedSet.add(s.name));
+                    toolSpecs.forEach(s => {
+                        if (dmLockActive && HIGH_SECURITY_TOOLS.has(s.name)) return;
+                        unlockedSet.add(s.name);
+                    });
                 } else {
                     for (const cat of rawCats) {
+                        if (dmLockActive && (cat === 'files' || cat === 'code_edit')) continue;
                         const list = TOOL_CATEGORIES[cat];
                         if (list) list.forEach(n => unlockedSet.add(n));
                     }
@@ -1073,7 +1134,9 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
                     unlockedTools: unlockedToolNames,
                     message: unlockedToolNames.length > 0
                         ? `Unlocked tools (${unlockedToolNames.join(', ')}). Proceed to invoke the required tool now.`
-                        : `Unknown category "${args.categories}". Valid categories: files, code_edit, discord, memory, web, scheduling, all.`
+                        : dmLockActive
+                            ? `Personal Vault & file tools are locked to private DMs only (VAULT_REQUIRE_DM_ONLY=true).`
+                            : `Unknown category "${args.categories}". Valid categories: files, code_edit, discord, memory, web, scheduling, all.`
                 };
             }
 

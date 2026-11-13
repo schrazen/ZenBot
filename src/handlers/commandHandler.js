@@ -36,12 +36,45 @@ class CommandHandler {
     }
 
     /**
-     * Checks if the message author is an authorized owner/admin.
+     * Checks if the message/interaction author is an authorized owner (fail-closed).
      */
     isOwner(message) {
-        const userId = message?.author?.id || message?.user?.id || message?.id;
-        return this.config.discord.allowedUserIds.length === 0 ||
-            (userId && this.config.discord.allowedUserIds.includes(userId));
+        const user = message?.author || message?.user || (typeof message === 'object' ? message : null);
+        const userId = user?.id || (typeof message === 'string' ? message : null);
+        const username = user?.username || null;
+
+        if (!userId) return false;
+
+        if (this.config?.security?.isAuthorizedOwner) {
+            return this.config.security.isAuthorizedOwner({ userId, username });
+        }
+
+        const allowed = this.config?.discord?.allowedUserIds || [];
+        return allowed.length > 0 && allowed.includes(String(userId));
+    }
+
+    /**
+     * Strict multi-factor check for Personal Vault, workspace files, and shell commands.
+     */
+    async _verifyFileAccessOrReply(message) {
+        if (!this.config?.security?.verifyFileAccess) {
+            if (!this.isOwner(message)) {
+                await message.reply('Only Lance (bot owner) can access files or commands.');
+                return false;
+            }
+            return true;
+        }
+        const isDM = !message.guild || (typeof message.channel?.isDMBased === 'function' && message.channel.isDMBased());
+        const access = this.config.security.verifyFileAccess({
+            userId: message.author?.id,
+            username: message.author?.username,
+            isDM
+        });
+        if (!access.allowed) {
+            await message.reply(`🔒 **High-Security Vault Lock:** ${access.reason}`);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -220,26 +253,26 @@ class CommandHandler {
                 return await this.cmdWeb(message, argText);
             case 'readfile':
             case 'cat':
-                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can inspect workspace files.');
+                if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdReadFile(message, args);
             case 'writefile':
-                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can write workspace files.');
+                if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdWriteFile(message, args, argText);
             case 'editfile':
-                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can edit workspace files.');
+                if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdEditFile(message, argText);
             case 'ls':
             case 'dir':
-                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can list workspace directories.');
+                if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdListDir(message, args);
             case 'search':
             case 'grep':
-                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can search workspace files.');
+                if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdSearch(message, args, argText);
             case 'run':
             case 'sh':
             case 'exec':
-                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can execute terminal commands.');
+                if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdRun(message, argText);
             default:
                 return await message.reply(`Unknown command \`!${cmd}\`. Use \`!help\` to see the full list.`);
@@ -403,7 +436,33 @@ class CommandHandler {
             .setFooter({ text: 'Use !limits to check real-time token quotas' })
             .setTimestamp();
 
-        return await message.reply({ embeds: [embed] });
+        const components = [];
+        if (this.isOwner(message)) {
+            components.push(
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('zen_panel:availability')
+                        .setLabel('Availability')
+                        .setEmoji('🟢')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId('zen_panel:automations')
+                        .setLabel('Automations')
+                        .setEmoji('⏱️')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId('zen_panel:reminders')
+                        .setLabel('Reminders')
+                        .setEmoji('⏰')
+                        .setStyle(ButtonStyle.Secondary)
+                )
+            );
+            if (this.ownerAvailability?.buildStatusComponents) {
+                components.push(...this.ownerAvailability.buildStatusComponents());
+            }
+        }
+
+        return await message.reply({ embeds: [embed], components });
     }
 
     async cmdLimits(message) {
@@ -1102,10 +1161,13 @@ class CommandHandler {
             return await message.reply(`✅ ${result.message}`);
         }
 
-        // !availability or !avail without args -> show status embed
+        // !availability or !avail without args -> show status embed + interactive buttons
         if (!raw || raw.toLowerCase() === 'status') {
             const embed = this.ownerAvailability.getStatusEmbed();
-            return await message.reply({ embeds: [embed] });
+            const components = (this.isOwner(message) && this.ownerAvailability.buildStatusComponents)
+                ? this.ownerAvailability.buildStatusComponents()
+                : [];
+            return await message.reply({ embeds: [embed], components });
         }
 
         const [action, ...restParts] = raw.split(/\s+/);
@@ -2009,22 +2071,47 @@ class CommandHandler {
         );
     }
 
-    async cmdListReminders(message) {
-        if (!this.reminderService) return await message.reply('ReminderService is not initialized.');
-
-        const list = this.reminderService.listReminders(message.author.id);
+    _buildReminderListPayload(userId) {
+        const list = this.reminderService.listReminders(userId);
         if (list.length === 0) {
-            return await message.reply('⏰ You have no active upcoming reminders. Set one with `!remind <time> to <task>`.');
+            return { content: '⏰ You have no active upcoming reminders. Set one with `!remind <time> to <task>`.', embeds: [], components: [] };
         }
 
-        let desc = list.map((r, i) => `**${i + 1}.** [${r.dueTimeStr}] ${r.task} \`[${r.id}]\``).join('\n');
+        const desc = list.map((r, i) => `**${i + 1}.** [${r.dueTimeStr}] ${r.task} \`[${r.id}]\``).join('\n');
         const embed = new EmbedBuilder()
             .setTitle(`⏰ Active Reminders (${list.length})`)
             .setDescription(desc)
             .setColor(0x00b4d8)
-            .setFooter({ text: 'Use !delremind <id or number> to remove a reminder' });
+            .setFooter({ text: 'Use buttons below or !delremind <id or number>' });
 
-        return await message.reply({ embeds: [embed] });
+        const components = [];
+        const doneRow = new ActionRowBuilder();
+        const snoozeRow = new ActionRowBuilder();
+        for (let i = 0; i < Math.min(list.length, 4); i++) {
+            const rem = list[i];
+            doneRow.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`zen_rem_done:${rem.id}`)
+                    .setLabel(`Done #${i + 1}`)
+                    .setEmoji('✅')
+                    .setStyle(ButtonStyle.Success)
+            );
+            snoozeRow.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`zen_rem_snooze:${rem.id}:15`)
+                    .setLabel(`Snooze #${i + 1}`)
+                    .setEmoji('⏰')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        }
+        if (doneRow.components.length > 0) components.push(doneRow, snoozeRow);
+        return { embeds: [embed], components };
+    }
+
+    async cmdListReminders(message) {
+        if (!this.reminderService) return await message.reply('ReminderService is not initialized.');
+        const payload = this._buildReminderListPayload(message.author.id);
+        return await message.reply(payload);
     }
 
     async cmdDeleteReminder(message, argText) {
@@ -2448,16 +2535,18 @@ class CommandHandler {
         }
     }
 
-    async cmdListAutomations(message) {
-        if (!this.automationService) return await message.reply('AutomationService is not initialized.');
-        const list = this.automationService.listAutomations(message.author.id);
-
+    _buildAutomationListPayload(userId) {
+        const list = this.automationService.listAutomations(userId);
         if (list.length === 0) {
-            return await message.reply(
-                'No active background automations.\n' +
-                'Set one up with: `!automate <schedule> do <task>`\n' +
-                '*(e.g. `!automate daily at 8am do morning standup` or `!automate every 2 hours do check https://... for updates`)*'
-            );
+            return {
+                content: (
+                    'No active background automations.\n' +
+                    'Set one up with: `!automate <schedule> do <task>`\n' +
+                    '*(e.g. `!automate daily at 8am do morning standup` or `!automate every 2 hours do check https://... for updates`)*'
+                ),
+                embeds: [],
+                components: []
+            };
         }
 
         const embed = new EmbedBuilder()
@@ -2474,10 +2563,37 @@ class CommandHandler {
                     );
                 }).join('\n\n')
             )
-            .setFooter({ text: 'Use !triggerauto <id> to test run or !delauto <id> to remove' })
+            .setFooter({ text: 'Use buttons below or !triggerauto <id> / !delauto <id>' })
             .setTimestamp();
 
-        return await message.reply({ embeds: [embed] });
+        const components = [];
+        const runRow = new ActionRowBuilder();
+        const muteRow = new ActionRowBuilder();
+        for (let i = 0; i < Math.min(list.length, 4); i++) {
+            const auto = list[i];
+            runRow.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`zen_auto_run:${auto.id}`)
+                    .setLabel(`Run #${i + 1}`)
+                    .setEmoji('▶️')
+                    .setStyle(ButtonStyle.Primary)
+            );
+            muteRow.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`zen_auto_mute:${auto.id}:3600000`)
+                    .setLabel(`Mute 1h #${i + 1}`)
+                    .setEmoji('🔕')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        }
+        if (runRow.components.length > 0) components.push(runRow, muteRow);
+        return { embeds: [embed], components };
+    }
+
+    async cmdListAutomations(message) {
+        if (!this.automationService) return await message.reply('AutomationService is not initialized.');
+        const payload = this._buildAutomationListPayload(message.author.id);
+        return await message.reply(payload);
     }
 
     async cmdDeleteAutomation(message, argText) {
@@ -2781,14 +2897,87 @@ class CommandHandler {
                 }
             }
 
+            if (action === 'zen_avail_set') {
+                if (!this.ownerAvailability) {
+                    return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', ephemeral: true });
+                }
+                const targetMode = (parts[1] || 'auto').toLowerCase();
+                const mapMode = { online: 'on', afk: 'away', sleep: 'sleep', auto: 'auto' };
+                const res = this.ownerAvailability.setManualState(mapMode[targetMode] || 'auto', targetMode === 'online' ? 'Confirmed online via button' : null);
+                if (res?.error) {
+                    return await interaction.reply({ content: `⚠️ ${res.error}`, ephemeral: true });
+                }
+                if (targetMode === 'online') {
+                    this.ownerAvailability.suppressChannel('global', 60 * 60 * 1000);
+                }
+                const embed = this.ownerAvailability.getStatusEmbed();
+                const components = this.ownerAvailability.buildStatusComponents ? this.ownerAvailability.buildStatusComponents() : [];
+                return await interaction.reply({
+                    content: `✅ ${res.message}`,
+                    embeds: [embed],
+                    components,
+                    ephemeral: Boolean(interaction.guild)
+                });
+            }
+
+            if (action === 'zen_panel') {
+                const section = (parts[1] || 'availability').toLowerCase();
+                const isGuild = Boolean(interaction.guild);
+                if (section === 'availability') {
+                    if (!this.ownerAvailability) return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', ephemeral: true });
+                    return await interaction.reply({
+                        embeds: [this.ownerAvailability.getStatusEmbed()],
+                        components: this.ownerAvailability.buildStatusComponents ? this.ownerAvailability.buildStatusComponents() : [],
+                        ephemeral: isGuild
+                    });
+                }
+                if (section === 'automations') {
+                    if (!this.automationService) return await interaction.reply({ content: 'AutomationService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ ...this._buildAutomationListPayload(interaction.user.id), ephemeral: isGuild });
+                }
+                if (section === 'reminders') {
+                    if (!this.reminderService) return await interaction.reply({ content: 'ReminderService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ ...this._buildReminderListPayload(interaction.user.id), ephemeral: isGuild });
+                }
+            }
+
+            if (action === 'zen_auto_run') {
+                if (!this.automationService) {
+                    return await interaction.reply({ content: 'AutomationService is not initialized.', ephemeral: true });
+                }
+                const autoId = parts[1];
+                const list = this.automationService.listAutomations(interaction.user.id);
+                const target = list.find(a => a.id === autoId);
+                if (!target) {
+                    return await interaction.reply({ content: `⚠️ Automation \`${autoId}\` not found.`, ephemeral: true });
+                }
+                await interaction.deferReply({ ephemeral: Boolean(interaction.guild) });
+                await this.automationService.executeAutomation(target);
+                return await interaction.editReply(`▶️ Executed **"${target.name}"** — Status: \`${target.lastStatus || 'done'}\``);
+            }
+
             if (action === 'zen_send_file') {
+                const isDM = !interaction.guild;
+                if (this.config?.security?.verifyFileAccess) {
+                    const access = this.config.security.verifyFileAccess({
+                        userId: interaction.user?.id,
+                        username: interaction.user?.username,
+                        isDM
+                    });
+                    if (!access.allowed) {
+                        return await interaction.reply({ content: `🔒 **High-Security Vault Lock:** ${access.reason}`, ephemeral: true });
+                    }
+                }
                 const filePath = customId.slice('zen_send_file:'.length);
                 await interaction.deferReply({ ephemeral: true });
                 const { executeTool } = require('../services/llm/toolDefinitions');
                 const res = await executeTool('send_file_to_owner', { filePath }, {
+                    config: this.config,
                     workspaceService: this.workspaceService,
                     client: this.client,
-                    userId: interaction.user.id
+                    userId: interaction.user.id,
+                    username: interaction.user.username,
+                    isDM
                 });
                 if (res?.error) {
                     return await interaction.editReply(`⚠️ Could not send file: ${res.error}`);

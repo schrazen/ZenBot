@@ -3,10 +3,11 @@ const fs = require('fs');
 const os = require('os');
 const dotenv = require('dotenv');
 
-// Prefer zen.env if it exists, otherwise check .env
+// Prefer zen.env if it exists, otherwise check .env; overlay security.env for owner/vault locks
 const rootDir = path.resolve(__dirname, '..');
 const zenEnvPath = path.join(rootDir, 'zen.env');
 const defaultEnvPath = path.join(rootDir, '.env');
+const securityEnvPath = path.join(rootDir, 'security.env');
 
 if (fs.existsSync(zenEnvPath)) {
     dotenv.config({ path: zenEnvPath });
@@ -14,6 +15,10 @@ if (fs.existsSync(zenEnvPath)) {
     dotenv.config({ path: defaultEnvPath });
 } else {
     dotenv.config();
+}
+
+if (fs.existsSync(securityEnvPath)) {
+    dotenv.config({ path: securityEnvPath, override: true });
 }
 
 // Humor Intensity Level Definitions (0 to 5)
@@ -80,7 +85,82 @@ const HUMOR_LEVELS = {
     }
 };
 
+const normalizeDiscordUsername = (name) =>
+    String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^@/, '')
+        .replace(/#0$/, '');
+
+const primaryAllowedIds = (process.env.DISCORD_ALLOWED_USERS || process.env.DISCORD_ALLOWED_USER_IDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+const vaultOwnerId = (process.env.VAULT_OWNER_DISCORD_ID || primaryAllowedIds[0] || '').trim();
+const vaultOwnerUsername = normalizeDiscordUsername(process.env.VAULT_OWNER_DISCORD_USERNAME || '');
+const vaultRequireDmOnly = (process.env.VAULT_REQUIRE_DM_ONLY || 'true').trim().toLowerCase() !== 'false';
+const effectiveAllowedUserIds = vaultOwnerId
+    ? Array.from(new Set([vaultOwnerId, ...primaryAllowedIds]))
+    : primaryAllowedIds;
+
+const resolvedVaultPaths = (() => {
+    if (process.env.PERSONAL_VAULT_PATHS) {
+        return process.env.PERSONAL_VAULT_PATHS.split(',').map(s => s.trim()).filter(Boolean);
+    }
+    const dirList = (process.env.VAULT_ALLOWED_DIRS || 'Documents,Downloads,Desktop')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+    return dirList.map(d => (path.isAbsolute(d) ? d : path.join(os.homedir(), d)));
+})();
+
 const config = {
+    // High-Security Owner & Personal Vault Identity Verification
+    security: {
+        ownerId: vaultOwnerId,
+        ownerUsername: vaultOwnerUsername,
+        requireDmOnly: vaultRequireDmOnly,
+
+        /**
+         * Fail-closed owner verification.
+         * Requires matching ownerId AND (when username is provided and ownerUsername is set) matching username.
+         */
+        isAuthorizedOwner({ userId, username } = {}) {
+            if (!this.ownerId || !userId) return false;
+            if (String(userId).trim() !== String(this.ownerId).trim()) return false;
+            if (this.ownerUsername && username !== undefined && username !== null && String(username).trim() !== '') {
+                if (normalizeDiscordUsername(username) !== this.ownerUsername) {
+                    return false;
+                }
+            }
+            return true;
+        },
+
+        /**
+         * Strict multi-factor check for Personal Vault, Workspace files, uploads, and shell execution.
+         * Requires exact User ID, exact Username (when ownerUsername is configured), and private DM (when requireDmOnly is true).
+         */
+        verifyFileAccess({ userId, username, isDM = false } = {}) {
+            if (!this.ownerId) {
+                return { allowed: false, reason: 'No VAULT_OWNER_DISCORD_ID is configured in security.env (fail-closed).' };
+            }
+            if (!userId || String(userId).trim() !== String(this.ownerId).trim()) {
+                return { allowed: false, reason: 'Discord User ID does not match VAULT_OWNER_DISCORD_ID.' };
+            }
+            if (this.ownerUsername) {
+                const normUser = normalizeDiscordUsername(username);
+                if (!normUser || normUser !== this.ownerUsername) {
+                    return { allowed: false, reason: 'Discord username does not match VAULT_OWNER_DISCORD_USERNAME.' };
+                }
+            }
+            if (this.requireDmOnly && !isDM) {
+                return { allowed: false, reason: 'Personal Vault and file tools are locked to private DMs only (VAULT_REQUIRE_DM_ONLY=true).' };
+            }
+            return { allowed: true };
+        }
+    },
+
     // Discord settings
     discord: {
         token: process.env.DISCORD_TOKEN || '',
@@ -91,10 +171,7 @@ const config = {
             .split(',')
             .map(s => s.trim())
             .filter(Boolean),
-        allowedUserIds: (process.env.DISCORD_ALLOWED_USERS || process.env.DISCORD_ALLOWED_USER_IDS || '')
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean),
+        allowedUserIds: effectiveAllowedUserIds,
         prefix: process.env.ZEN_PREFIX || '!'
     },
 
@@ -137,14 +214,7 @@ const config = {
         preferences: path.join(rootDir, 'data', 'preferences.json'),
         goals: path.join(rootDir, 'data', 'goals.json'),
         automations: path.join(rootDir, 'data', 'automations.json'),
-        vaultPaths: (process.env.PERSONAL_VAULT_PATHS
-            ? process.env.PERSONAL_VAULT_PATHS.split(',').map(s => s.trim()).filter(Boolean)
-            : [
-                path.join(os.homedir(), 'Documents'),
-                path.join(os.homedir(), 'Downloads'),
-                path.join(os.homedir(), 'Desktop')
-            ]
-        ).filter(p => {
+        vaultPaths: resolvedVaultPaths.filter(p => {
             try { return fs.existsSync(p) && fs.statSync(p).isDirectory(); } catch (e) { return false; }
         })
     },

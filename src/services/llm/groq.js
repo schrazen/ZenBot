@@ -54,13 +54,23 @@ class GroqProvider {
             const data = await res.json();
 
             if (!res.ok) {
-                // If the primary model failed due to token limits or 404, try the fallback model once
-                if (modelToUse !== this.fallbackModel && (res.status === 400 || res.status === 404 || res.status === 429)) {
+                const errMessage = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+
+                // Do NOT retry fallbackModel on 429 (same org 8,000 TPM pool) or malformed <|channel|> tool syntax;
+                // let LLMManager immediately fail over to Gemini and start Groq's cooldown.
+                const isChannelTokenErr = /<\|channel\|>/i.test(errMessage);
+                const shouldRetryFallback = (
+                    modelToUse !== this.fallbackModel &&
+                    this.fallbackModel &&
+                    !isChannelTokenErr &&
+                    (res.status === 404 || res.status === 503)
+                );
+
+                if (shouldRetryFallback) {
                     logger.warn(`Groq model ${modelToUse} failed (${res.status}). Retrying with fallback ${this.fallbackModel}...`);
                     return await this.chat(messages, { ...options, model: this.fallbackModel });
                 }
 
-                const errMessage = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
                 throw new Error(`Groq API error: ${errMessage}`);
             }
 
@@ -68,7 +78,14 @@ class GroqProvider {
             const rawMsg = choice?.message;
             const finishReason = choice?.finish_reason || 'stop';
             const reply = rawMsg?.content;
-            const toolCalls = rawMsg?.tool_calls || null;
+            const toolCalls = Array.isArray(rawMsg?.tool_calls)
+                ? rawMsg.tool_calls.map(tc => ({
+                    ...tc,
+                    function: tc.function
+                        ? { ...tc.function, name: String(tc.function.name || '').replace(/<\|.*$/g, '').trim() }
+                        : tc.function
+                }))
+                : null;
 
             if (!reply && (!toolCalls || toolCalls.length === 0)) {
                 if (finishReason === 'length' && !options._retriedEmpty) {

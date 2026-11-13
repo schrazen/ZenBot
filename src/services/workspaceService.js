@@ -30,6 +30,7 @@ class WorkspaceService {
         const base = path.basename(fullPath).toLowerCase();
         const norm = fullPath.replace(/\\/g, '/').toLowerCase();
 
+        if (base === 'security.env' || base === 'zen.env') return true;
         if (/^\.env(?:\.|$)/i.test(base) || /\.env$/i.test(base)) return true;
         if (/\.(pem|key|pfx|p12|kdbx)$/i.test(base)) return true;
         if (/^(id_rsa|id_ed25519|known_hosts|authorized_keys)$/i.test(base)) return true;
@@ -90,15 +91,15 @@ class WorkspaceService {
      */
     _displayPath(fullPath) {
         if (this._isInside(this.rootDir, fullPath)) {
-            return path.relative(this.rootDir, fullPath) || '.';
+            return (path.relative(this.rootDir, fullPath) || '.').replace(/\\/g, '/');
         }
         for (const v of this.vaultDirs) {
             if (this._isInside(v, fullPath)) {
                 const rel = path.relative(v, fullPath);
-                return rel ? path.join(path.basename(v), rel) : path.basename(v);
+                return (rel ? path.join(path.basename(v), rel) : path.basename(v)).replace(/\\/g, '/');
             }
         }
-        return fullPath;
+        return String(fullPath).replace(/\\/g, '/');
     }
 
     /**
@@ -328,7 +329,7 @@ class WorkspaceService {
 
                 const entryPath = path.join(currentDir, entry.name);
                 if (this.isSensitiveFile(entryPath)) continue;
-                const relPath = path.relative(fullPath, entryPath);
+                const displayEntryPath = this._displayPath(entryPath);
 
                 let mtimeMs = 0;
                 let size = 0;
@@ -339,17 +340,18 @@ class WorkspaceService {
                 } catch (e) {}
 
                 if (entry.isDirectory()) {
-                    results.push({ name: entry.name, path: relPath, type: 'dir', mtimeMs });
+                    results.push({ name: entry.name, path: displayEntryPath, type: 'dir', mtimeMs });
                     if (currentDepth < safeDepth) {
                         scan(entryPath, currentDepth + 1);
                     }
                 } else {
                     results.push({
                         name: entry.name,
-                        path: relPath,
+                        path: displayEntryPath,
                         type: 'file',
                         size,
                         sizeFormatted: this._formatBytes(size),
+                        sendableToDiscord: size > 0 && size <= 25 * 1024 * 1024,
                         mtimeMs
                     });
                 }
@@ -443,14 +445,65 @@ class WorkspaceService {
     }
 
     /**
-     * Searches for files by filename/extension across the project workspace and personal vaults
-     * (Documents, Downloads, Desktop). Ideal for locating PDFs, documents, images, or notes to send.
+     * Searches for files by filename/extension/category across the project workspace and personal vaults
+     * (Documents, Downloads, Desktop). Supports wildcards ("", "*", "all", "random") and media categories
+     * ("image", "video", "audio", "document", "archive").
      */
-    async findFilesByName(query, location = 'all', maxResults = 25) {
-        const needle = (query || '').trim().toLowerCase();
-        if (!needle) {
-            throw new Error('Filename query cannot be empty.');
+    async findFilesByName(query, location = 'all', maxResults = 25, options = {}) {
+        const rawQuery = String(query ?? '').trim().toLowerCase();
+        const isRandom = /\brandom\b/.test(rawQuery) || Boolean(options.random);
+        const sendableOnly = Boolean(options.sendableOnly);
+
+        const CATEGORY_EXTS = {
+            image: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg'],
+            images: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg'],
+            photo: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'],
+            photos: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'],
+            picture: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'],
+            pictures: ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'],
+            screenshot: ['.png', '.jpg', '.jpeg', '.webp'],
+            screenshots: ['.png', '.jpg', '.jpeg', '.webp'],
+            video: ['.mp4', '.mkv', '.mov', '.webm', '.avi'],
+            videos: ['.mp4', '.mkv', '.mov', '.webm', '.avi'],
+            clip: ['.mp4', '.mkv', '.mov', '.webm'],
+            movie: ['.mp4', '.mkv', '.mov', '.avi'],
+            audio: ['.mp3', '.wav', '.ogg', '.m4a', '.flac'],
+            music: ['.mp3', '.wav', '.ogg', '.m4a', '.flac'],
+            sound: ['.mp3', '.wav', '.ogg', '.m4a'],
+            song: ['.mp3', '.wav', '.ogg', '.m4a', '.flac'],
+            document: ['.pdf', '.docx', '.doc', '.txt', '.md', '.pptx', '.xlsx', '.csv'],
+            documents: ['.pdf', '.docx', '.doc', '.txt', '.md', '.pptx', '.xlsx', '.csv'],
+            doc: ['.pdf', '.docx', '.doc', '.txt', '.md'],
+            docs: ['.pdf', '.docx', '.doc', '.txt', '.md'],
+            archive: ['.zip', '.rar', '.7z', '.tar', '.gz'],
+            zip: ['.zip', '.rar', '.7z']
+        };
+
+        // Strip filler/location words when interpreting query intent
+        const cleanedQuery = rawQuery
+            .replace(/\b(?:random|one|a|an|any|some|file|files|from|in|my)\b/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const isWildcard = !cleanedQuery || ['*', '*.*', 'all', 'any', 'everything'].includes(cleanedQuery);
+        let categoryExts = null;
+        if (cleanedQuery && CATEGORY_EXTS[cleanedQuery]) {
+            categoryExts = CATEGORY_EXTS[cleanedQuery];
+        } else {
+            const matchedCatWord = cleanedQuery.split(/\s+/).find(w => CATEGORY_EXTS[w]);
+            if (matchedCatWord && cleanedQuery === matchedCatWord) {
+                categoryExts = CATEGORY_EXTS[matchedCatWord];
+            }
         }
+
+        // Convert "*.png" -> ".png"
+        const normalizedTerms = (isWildcard || categoryExts)
+            ? []
+            : cleanedQuery
+                .replace(/^\*+(\.[a-z0-9]+)$/i, '$1')
+                .replace(/\*/g, ' ')
+                .split(/\s+/)
+                .filter(t => t && t !== '*');
 
         const ignoreList = new Set(['node_modules', '.git', '.gemini', 'package-lock.json', 'AppData']);
         const searchRoots = [];
@@ -465,11 +518,12 @@ class WorkspaceService {
             searchRoots.push(this.resolveReadPath(location));
         }
 
+        const scanPoolLimit = isRandom ? Math.max(maxResults * 6, 150) : maxResults;
         const matches = [];
         const seenPaths = new Set();
 
         const scan = (currentDir, depth = 0) => {
-            if (matches.length >= maxResults || depth > 4) return;
+            if (matches.length >= scanPoolLimit || depth > 4) return;
             let entries = [];
             try {
                 entries = fs.readdirSync(currentDir, { withFileTypes: true });
@@ -478,7 +532,7 @@ class WorkspaceService {
             }
 
             for (const entry of entries) {
-                if (matches.length >= maxResults) return;
+                if (matches.length >= scanPoolLimit) return;
                 if (ignoreList.has(entry.name)) continue;
 
                 const entryPath = path.join(currentDir, entry.name);
@@ -489,8 +543,17 @@ class WorkspaceService {
                     scan(entryPath, depth + 1);
                 } else if (entry.isFile()) {
                     const lowerName = entry.name.toLowerCase();
-                    const terms = needle.split(/\s+/).filter(Boolean);
-                    const matched = terms.every(t => lowerName.includes(t));
+                    const ext = path.extname(lowerName);
+                    let matched = false;
+
+                    if (isWildcard) {
+                        matched = true;
+                    } else if (categoryExts) {
+                        matched = categoryExts.includes(ext);
+                    } else {
+                        matched = normalizedTerms.every(t => lowerName.includes(t));
+                    }
+
                     if (matched) {
                         let size = 0;
                         let modifiedAt = null;
@@ -499,11 +562,15 @@ class WorkspaceService {
                             size = st.size;
                             modifiedAt = st.mtime?.toISOString() || null;
                         } catch (e) {}
+                        const sendable = size > 0 && size <= 25 * 1024 * 1024;
+                        if (sendableOnly && !sendable) continue;
                         matches.push({
                             name: entry.name,
                             path: this._displayPath(entryPath),
                             sizeBytes: size,
                             sizeMB: Number((size / (1024 * 1024)).toFixed(2)),
+                            sizeFormatted: this._formatBytes(size),
+                            sendableToDiscord: sendable,
                             modifiedAt
                         });
                     }
@@ -512,19 +579,30 @@ class WorkspaceService {
         };
 
         for (const root of searchRoots) {
-            if (matches.length >= maxResults) break;
+            if (matches.length >= scanPoolLimit) break;
             scan(root, 0);
         }
 
-        // Most recently modified first
-        matches.sort((a, b) => (b.modifiedAt || '').localeCompare(a.modifiedAt || ''));
+        if (isRandom) {
+            // Shuffle matches cleanly (Fisher-Yates), prioritizing files <= 25 MB that Discord can actually upload
+            for (let i = matches.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [matches[i], matches[j]] = [matches[j], matches[i]];
+            }
+            matches.sort((a, b) => Number(b.sendableToDiscord) - Number(a.sendableToDiscord));
+        } else {
+            // Most recently modified first
+            matches.sort((a, b) => (b.modifiedAt || '').localeCompare(a.modifiedAt || ''));
+        }
+
+        const finalMatches = matches.slice(0, maxResults);
 
         return {
             query,
             location,
             searchedRoots: searchRoots.map(r => this._displayPath(r)),
-            totalMatches: matches.length,
-            matches
+            totalMatches: finalMatches.length,
+            matches: finalMatches
         };
     }
 

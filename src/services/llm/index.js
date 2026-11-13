@@ -27,7 +27,29 @@ class LLMManager {
 
         this.currentProviderName = preferred;
         this.providerCooldownUntil = new Map();
+        this.groqRecentTokens = [];
         logger.info(`LLMManager initialized. Active provider: ${this.currentProviderName}`);
+    }
+
+    /**
+     * Tracks rolling 60-second Groq token usage to avoid hitting 8,000 TPM limits.
+     */
+    _pruneGroqTokens(now = Date.now()) {
+        const cutoff = now - 60 * 1000;
+        this.groqRecentTokens = this.groqRecentTokens.filter(entry => entry.ts > cutoff);
+    }
+
+    _getRecentGroqTokens() {
+        this._pruneGroqTokens();
+        return this.groqRecentTokens.reduce((sum, entry) => sum + entry.tokens, 0);
+    }
+
+    _recordGroqTokens(tokens) {
+        const count = Math.max(0, Number(tokens) || 0);
+        if (count <= 0) return;
+        const now = Date.now();
+        this._pruneGroqTokens(now);
+        this.groqRecentTokens.push({ ts: now, tokens: count });
     }
 
     /**
@@ -219,18 +241,29 @@ class LLMManager {
             return await geminiProvider.chat(messages, options);
         }
 
-        // Smart pre-routing: If primary is Groq and it's either in 429 cooldown OR request exceeds Groq's 8k TPM budget,
+        // Smart pre-routing: If primary is Groq and it's either in 429 cooldown OR single/rolling request exceeds safe TPM headroom,
         // route directly to Gemini (1M TPM) without wasting latency/quota on doomed Groq calls.
+        let estGroqTokens = 0;
         if (this.currentProviderName === 'groq' && geminiProvider?.isConfigured()) {
             const cooldownUntil = this.providerCooldownUntil.get('groq') || 0;
-            const estTokens = this.estimateTokens(messages, options);
-            if (Date.now() < cooldownUntil || estTokens > 6800) {
+            estGroqTokens = this.estimateTokens(messages, options);
+            const recentUsed = this._getRecentGroqTokens();
+            if (Date.now() < cooldownUntil || estGroqTokens > 4500 || (recentUsed + estGroqTokens) > 6200) {
                 return await geminiProvider.chat(messages, options);
             }
         }
 
         try {
-            return await active.chat(messages, options);
+            if (this.currentProviderName === 'groq') {
+                this._recordGroqTokens(estGroqTokens || this.estimateTokens(messages, options));
+            }
+            const res = await active.chat(messages, options);
+            if (this.currentProviderName === 'groq' && res?.usage?.total_tokens) {
+                // Adjust rolling tracker toward actual reported tokens if higher
+                const delta = res.usage.total_tokens - (estGroqTokens || 0);
+                if (delta > 0) this._recordGroqTokens(delta);
+            }
+            return res;
         } catch (primaryError) {
             logger.warn(`Primary provider (${this.currentProviderName}) failed: ${primaryError.message}`);
 

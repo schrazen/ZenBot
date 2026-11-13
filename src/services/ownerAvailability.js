@@ -79,12 +79,15 @@ class OwnerAvailabilityService {
     }
 
     /**
-     * Returns list of configured owner Discord IDs.
+     * Returns list of configured owner Discord IDs (fail-closed, respects security.env).
      */
     getOwnerIds() {
-        const ids = this.config.discord.allowedUserIds || [];
-        if (ids.length > 0) return ids;
-        return ['1201887051520151656', '871274613227798589'];
+        const secId = this.config?.security?.ownerId;
+        const ids = Array.isArray(this.config?.discord?.allowedUserIds) ? this.config.discord.allowedUserIds : [];
+        if (secId) {
+            return Array.from(new Set([String(secId), ...ids.map(String)]));
+        }
+        return ids.map(String);
     }
 
     /**
@@ -966,6 +969,37 @@ class OwnerAvailabilityService {
             .setTimestamp();
 
         return embed;
+    }
+
+    /**
+     * Builds interactive Discord button controls for switching owner availability state.
+     */
+    buildStatusComponents() {
+        const manual = this.data?.manual_state || null;
+        return [
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('zen_avail_set:online')
+                    .setLabel('Set Online')
+                    .setEmoji('🟢')
+                    .setStyle(manual === 'AVAILABLE' ? ButtonStyle.Success : ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('zen_avail_set:afk')
+                    .setLabel('Set Away')
+                    .setEmoji('🟡')
+                    .setStyle(manual === 'INACTIVE' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('zen_avail_set:sleep')
+                    .setLabel('Set Sleep')
+                    .setEmoji('🟣')
+                    .setStyle(manual === 'LIKELY_ASLEEP' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('zen_avail_set:auto')
+                    .setLabel('Auto Mode')
+                    .setEmoji('🔄')
+                    .setStyle(!manual ? ButtonStyle.Success : ButtonStyle.Secondary)
+            )
+        ];
     }
 }
 
