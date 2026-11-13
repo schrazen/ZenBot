@@ -150,6 +150,7 @@ class ZenBot {
             this.botProfileService.watchProfile(this.client);
             this.reminderService.start(this.client);
             this.automationService.start(this.client);
+            this.automationService.markEventsHooked?.();
             this.ownerAvailability.syncRecentActivityFromGuilds(this.client).catch(() => {});
 
             if (!this.botProfileService.getProfile().bio) {
@@ -165,6 +166,7 @@ class ZenBot {
         this.client.on('messageCreate', async (message) => {
             try {
                 if (message.author?.bot) return;
+                this.automationService?.recordWatchedGuildEvent?.(message);
                 this.messageQueueService.enqueue(message, async (finalMsg) => {
                     await this.messageHandler.handle(finalMsg);
                 });

@@ -34,10 +34,28 @@ class GeminiProvider {
                 if (!text && msg.tool_calls && msg.tool_calls.length > 0) {
                     text = msg.tool_calls.map(tc => `[Called tool ${tc.function?.name}(${tc.function?.arguments || ''})]`).join('\n');
                 }
+                const parts = [];
+                if (Array.isArray(msg.attachments)) {
+                    for (const att of msg.attachments) {
+                        if (att?.mimeType && att?.data) {
+                            parts.push({
+                                inlineData: {
+                                    mimeType: att.mimeType,
+                                    data: att.data
+                                }
+                            });
+                        }
+                    }
+                }
                 if (text.trim()) {
+                    parts.push({ text });
+                } else if (parts.length > 0) {
+                    parts.push({ text: 'Analyze the attached file(s).' });
+                }
+                if (parts.length > 0) {
                     contents.push({
                         role: msg.role === 'assistant' ? 'model' : 'user',
-                        parts: [{ text }]
+                        parts
                     });
                 }
             }

@@ -212,6 +212,12 @@ class LLMManager {
 
         const active = this.getCurrentProvider();
         const geminiProvider = this.providers.get('gemini');
+        const hasMultimodal = Array.isArray(messages) && messages.some(m => Array.isArray(m.attachments) && m.attachments.length > 0);
+
+        // Multimodal inputs (images, audio voice notes, PDFs) require Gemini inlineData support
+        if (hasMultimodal && geminiProvider?.isConfigured()) {
+            return await geminiProvider.chat(messages, options);
+        }
 
         // Smart pre-routing: If primary is Groq and it's either in 429 cooldown OR request exceeds Groq's 8k TPM budget,
         // route directly to Gemini (1M TPM) without wasting latency/quota on doomed Groq calls.
@@ -340,6 +346,8 @@ class LLMManager {
 
         const workingMessages = [...messages];
         const executedTools = [];
+        let activeGroqTools = tools;
+        let activeGeminiTools = geminiTools;
         let currentStep = 0;
         let promiseContinuations = 0;
         const maxPromiseContinuations = 2;
@@ -350,8 +358,8 @@ class LLMManager {
 
             const currentOptions = {
                 ...options,
-                tools,
-                geminiTools
+                tools: activeGroqTools,
+                geminiTools: activeGeminiTools
             };
 
             const response = await this.chat(workingMessages, currentOptions);
@@ -441,6 +449,21 @@ class LLMManager {
                     result = await executeTool(name, rawArgs);
                 } catch (err) {
                     result = { error: err.message };
+                }
+
+                // Dynamically expand active tool schemas when unlock_tools succeeds
+                if (name === 'unlock_tools' && result?.success && Array.isArray(result.unlockedTools)) {
+                    try {
+                        const { getGroqTools, getGeminiTools } = require('./toolDefinitions');
+                        const currentNames = new Set(
+                            (Array.isArray(activeGroqTools) ? activeGroqTools : [])
+                                .map(t => t.function?.name)
+                                .filter(Boolean)
+                        );
+                        result.unlockedTools.forEach(n => currentNames.add(n));
+                        activeGroqTools = getGroqTools(currentNames);
+                        activeGeminiTools = getGeminiTools(currentNames);
+                    } catch (e) {}
                 }
 
                 executedTools.push({

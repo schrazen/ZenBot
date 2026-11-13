@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
@@ -1636,9 +1636,15 @@ class CommandHandler {
     }
 
     /**
-     * Handles Discord Slash Command interactions (/help, /status, /roll, etc.)
+     * Handles Discord Slash Commands, Interactive Buttons, and Modals.
      */
     async handleInteraction(interaction) {
+        if (interaction.isButton()) {
+            return await this.handleButtonInteraction(interaction);
+        }
+        if (interaction.isModalSubmit()) {
+            return await this.handleModalSubmit(interaction);
+        }
         if (!interaction.isChatInputCommand()) return;
 
         // Strict DM restriction: only the owner can interact with the bot in DMs
@@ -2527,7 +2533,8 @@ class CommandHandler {
             return await message.reply('No pending self-upgrade proposals right now.');
         }
         const embed = this.selfUpgradeService.buildProposalEmbed(pending);
-        return await message.reply({ embeds: [embed] });
+        const components = this.selfUpgradeService.buildProposalComponents(pending);
+        return await message.reply({ embeds: [embed], components });
     }
 
     async cmdApproveUpgrade(message, argText) {
@@ -2630,6 +2637,199 @@ class CommandHandler {
         } catch (err) {
             logger.error(`Failed to post message to #${targetChannel.name}: ${err.message}`);
             return await message.reply(`❌ Failed to send message to #${targetChannel.name}: ${err.message}`);
+        }
+    }
+
+    // ==========================================
+    // INTERACTIVE BUTTON & MODAL HANDLERS
+    // ==========================================
+
+    async handleButtonInteraction(interaction) {
+        if (!this.isOwner(interaction)) {
+            return await interaction.reply({
+                content: 'Only Lance (bot owner) can use ZenBot interactive controls.',
+                ephemeral: true
+            });
+        }
+
+        const customId = interaction.customId || '';
+        const parts = customId.split(':');
+        const action = parts[0];
+
+        try {
+            if (action === 'zen_reply_modal') {
+                const targetChannelId = parts[1];
+                let chLabel = 'channel';
+                try {
+                    const ch = await this.client.channels.fetch(targetChannelId);
+                    if (ch?.name) chLabel = `#${ch.name}`.slice(0, 25);
+                } catch (e) {}
+
+                const modal = new ModalBuilder()
+                    .setCustomId(`zen_reply_submit:${targetChannelId}`)
+                    .setTitle(`Quick Reply to ${chLabel}`);
+
+                const input = new TextInputBuilder()
+                    .setCustomId('reply_text')
+                    .setLabel('Message to send via ZenBot')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setPlaceholder('Type your reply here...')
+                    .setRequired(true)
+                    .setMaxLength(1800);
+
+                modal.addComponents(new ActionRowBuilder().addComponents(input));
+                return await interaction.showModal(modal);
+            }
+
+            if (action === 'zen_upg_approve' || action === 'zen_upg_reject') {
+                if (!this.selfUpgradeService) {
+                    return await interaction.reply({ content: 'SelfUpgradeService is not initialized.', ephemeral: true });
+                }
+                await interaction.deferReply({ ephemeral: false });
+                const targetId = parts[1] || 'all';
+
+                if (action === 'zen_upg_approve') {
+                    const res = await this.selfUpgradeService.approve(targetId);
+                    if (!res.success && (!res.failed || res.failed.length === 0)) {
+                        return await interaction.editReply(`⚠️ ${res.message}`);
+                    }
+                    const lines = [];
+                    if (res.applied?.length > 0) {
+                        lines.push(`✅ **Approved & Applied (${res.applied.length}):**`);
+                        res.applied.forEach(p => lines.push(`• \`${p.filePath}\` (\`${p.id}\`) — *${p.reason}* (Syntax verified ✓)`));
+                    }
+                    if (res.failed?.length > 0) {
+                        lines.push(`\n❌ **Failed & Auto-Rolled Back (${res.failed.length}):**`);
+                        res.failed.forEach(f => lines.push(`• \`${f.filePath}\` (\`${f.id}\`): ${f.error}`));
+                    }
+                    try { await interaction.message.edit({ components: [] }); } catch (e) {}
+                    return await interaction.editReply(lines.join('\n'));
+                } else {
+                    const res = this.selfUpgradeService.reject(targetId);
+                    if (!res.success) return await interaction.editReply(`⚠️ ${res.message}`);
+                    const names = res.rejected.map(p => `\`${p.filePath}\` (\`${p.id}\`)`).join(', ');
+                    try { await interaction.message.edit({ components: [] }); } catch (e) {}
+                    return await interaction.editReply(`🛑 Rejected and discarded pending proposal(s): ${names}`);
+                }
+            }
+
+            if (action === 'zen_avail_online' || action === 'zen_avail_mute') {
+                if (!this.ownerAvailability) {
+                    return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', ephemeral: true });
+                }
+                const targetChannelId = parts[1] || 'global';
+                if (action === 'zen_avail_online') {
+                    this.ownerAvailability.suppressChannel('global', 60 * 60 * 1000);
+                    this.ownerAvailability.setManualState('on', 'Confirmed online via quick button');
+                    return await interaction.reply({
+                        content: '🟢 Status set to **AVAILABLE** and AFK auto-replies muted globally for **1 hour**.',
+                        ephemeral: true
+                    });
+                } else {
+                    this.ownerAvailability.suppressChannel(targetChannelId, 60 * 60 * 1000);
+                    return await interaction.reply({
+                        content: `🔕 Muted AFK auto-replies for channel \`${targetChannelId}\` for **1 hour**.`,
+                        ephemeral: true
+                    });
+                }
+            }
+
+            if (action === 'zen_auto_mute' || action === 'zen_auto_del') {
+                if (!this.automationService) {
+                    return await interaction.reply({ content: 'AutomationService is not initialized.', ephemeral: true });
+                }
+                const autoId = parts[1];
+                if (action === 'zen_auto_mute') {
+                    const durationMs = parseInt(parts[2] || '3600000', 10) || 3600000;
+                    const res = this.automationService.muteAutomation(autoId, durationMs);
+                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, ephemeral: true });
+                    return await interaction.reply({
+                        content: `🔕 Snoozed **"${res.automation.name}"** for **${Math.round(durationMs / 60000)}m**.`,
+                        ephemeral: true
+                    });
+                } else {
+                    const res = this.automationService.deleteAutomation(autoId, interaction.user.id);
+                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, ephemeral: true });
+                    try { await interaction.message.edit({ components: [] }); } catch (e) {}
+                    return await interaction.reply({
+                        content: `🗑️ Disabled & deleted automation **"${res.removed.name}"**.`,
+                        ephemeral: true
+                    });
+                }
+            }
+
+            if (action === 'zen_rem_snooze' || action === 'zen_rem_done') {
+                if (!this.reminderService) {
+                    return await interaction.reply({ content: 'ReminderService is not initialized.', ephemeral: true });
+                }
+                const remId = parts[1];
+                if (action === 'zen_rem_snooze') {
+                    const mins = parseInt(parts[2] || '15', 10) || 15;
+                    const res = this.reminderService.snoozeReminder(remId, mins, interaction.user.id);
+                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, ephemeral: true });
+                    return await interaction.reply({
+                        content: `⏰ Snoozed **"${res.reminder.task}"** for **${mins}m** (next alert: **${res.reminder.dueTimeStr}**).`,
+                        ephemeral: true
+                    });
+                } else {
+                    const res = this.reminderService.completeReminder(remId, interaction.user.id);
+                    try { await interaction.message.edit({ components: [] }); } catch (e) {}
+                    return await interaction.reply({
+                        content: res.success ? `✅ Marked reminder **"${res.reminder.task}"** complete.` : `✅ Reminder marked complete.`,
+                        ephemeral: true
+                    });
+                }
+            }
+
+            if (action === 'zen_send_file') {
+                const filePath = customId.slice('zen_send_file:'.length);
+                await interaction.deferReply({ ephemeral: true });
+                const { executeTool } = require('../services/llm/toolDefinitions');
+                const res = await executeTool('send_file_to_owner', { filePath }, {
+                    workspaceService: this.workspaceService,
+                    client: this.client,
+                    userId: interaction.user.id
+                });
+                if (res?.error) {
+                    return await interaction.editReply(`⚠️ Could not send file: ${res.error}`);
+                }
+                return await interaction.editReply(`📎 Sent \`${res.fileName}\` directly to your DM.`);
+            }
+        } catch (err) {
+            logger.error(`Button interaction error (${customId}): ${err.message}`);
+            if (interaction.deferred || interaction.replied) {
+                return await interaction.editReply({ content: `Error: ${err.message}` }).catch(() => {});
+            }
+            return await interaction.reply({ content: `Error: ${err.message}`, ephemeral: true }).catch(() => {});
+        }
+    }
+
+    async handleModalSubmit(interaction) {
+        if (!this.isOwner(interaction)) {
+            return await interaction.reply({ content: 'Only Lance can submit this modal.', ephemeral: true });
+        }
+
+        const customId = interaction.customId || '';
+        if (customId.startsWith('zen_reply_submit:')) {
+            const targetChannelId = customId.slice('zen_reply_submit:'.length);
+            const text = interaction.fields.getTextInputValue('reply_text')?.trim();
+            if (!text) {
+                return await interaction.reply({ content: 'Reply message cannot be empty.', ephemeral: true });
+            }
+            try {
+                const targetChannel = await this.client.channels.fetch(targetChannelId);
+                if (!targetChannel || !targetChannel.isTextBased()) {
+                    return await interaction.reply({ content: `Channel \`${targetChannelId}\` not found or not text-based.`, ephemeral: true });
+                }
+                await targetChannel.send(text);
+                const loc = targetChannel.guild ? `#${targetChannel.name} (${targetChannel.guild.name})` : `#${targetChannel.name || targetChannelId}`;
+                return await interaction.reply({
+                    content: `✅ Sent to **${loc}**:\n> ${text.slice(0, 300)}`,
+                    ephemeral: true
+                });
+            } catch (err) {
+                return await interaction.reply({ content: `❌ Failed to send message: ${err.message}`, ephemeral: true });
+            }
         }
     }
 }

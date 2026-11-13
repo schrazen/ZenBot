@@ -466,14 +466,120 @@ const toolSpecs = [
             },
             required: ['id']
         }
+    },
+    {
+        name: 'unlock_tools',
+        description: 'Unlock additional tool categories for this turn if a tool you need is not yet in your active list. Categories: "files", "code_edit", "discord", "memory", "web", "scheduling", or "all".',
+        parameters: {
+            type: 'object',
+            properties: {
+                categories: {
+                    type: 'string',
+                    description: 'Comma-separated categories to unlock: "files", "code_edit", "discord", "memory", "web", "scheduling", or "all".'
+                }
+            },
+            required: ['categories']
+        }
     }
 ];
+
+const TOOL_CATEGORIES = {
+    files: ['read_file', 'list_directory', 'search_files', 'find_files', 'send_file_to_owner'],
+    code_edit: ['read_file', 'write_file', 'edit_file', 'propose_self_upgrade', 'run_command', 'search_files', 'list_directory'],
+    discord: ['read_discord_channel', 'post_discord_message', 'set_owner_availability'],
+    memory: ['remember_fact', 'save_preference', 'search_memory', 'set_persona_mode', 'update_project_task'],
+    web: ['web_search', 'fetch_web_page'],
+    scheduling: ['set_reminder', 'list_reminders', 'delete_reminder', 'schedule_automation', 'list_automations', 'delete_automation']
+};
+
+function _filterSpecs(allowedNames = null) {
+    if (!allowedNames) return toolSpecs;
+    const allowedSet = allowedNames instanceof Set ? allowedNames : new Set(allowedNames);
+    return toolSpecs.filter(spec => allowedSet.has(spec.name));
+}
+
+/**
+ * Infers the minimal relevant subset of tools for a given user query / task prompt.
+ * Always keeps core proactive memory tools + `unlock_tools` so the agent can expand if needed.
+ */
+function inferToolNamesForQuery(query = '', extraCategories = []) {
+    const text = String(query || '').toLowerCase();
+    const names = new Set(['remember_fact', 'save_preference', 'unlock_tools']);
+    const extras = Array.isArray(extraCategories) ? extraCategories : [extraCategories];
+
+    if (extras.includes('all')) {
+        return toolSpecs.map(s => s.name);
+    }
+
+    const addCategory = (cat) => {
+        const list = TOOL_CATEGORIES[cat];
+        if (list) list.forEach(n => names.add(n));
+    };
+
+    for (const cat of extras) {
+        addCategory(cat);
+    }
+
+    let matchedAny = false;
+
+    if (/\b(?:file|files|folder|dir|directory|downloads?|documents?|desktop|pdf|resume|cv|reviewer|notes?|txt|md|read|find|search|send\s+me|upload|attach|extract|contain|inside)\b/i.test(text)) {
+        addCategory('files');
+        matchedAny = true;
+    }
+
+    if (/\b(?:code|src|source|bug|fix|patch|edit|write|create\s+file|upgrade|propose|self[- ]?upgrade|run|command|cmd|terminal|shell|git|npm|node|test|script|package\.json|handler|service)\b/i.test(text)) {
+        addCategory('code_edit');
+        matchedAny = true;
+    }
+
+    if (/\b(?:discord|server|channel|banorant|banoranttt|rodericks|col|chat|messages?|recap|catch\s*up|summariz|post|reply|friends?|status|avail|availability|online|offline|away|afk|sleep|mute)\b/i.test(text)) {
+        addCategory('discord');
+        matchedAny = true;
+    }
+
+    if (/\b(?:remember|fact|memory|memories|forget|preference|prefer|rule|persona|formal|serious|casual|humor|mode|project|projects|task|tasks|balik|ti-to)\b/i.test(text)) {
+        addCategory('memory');
+        matchedAny = true;
+    }
+
+    if (/\b(?:web|google|internet|online|search|lookup|look\s*up|http|https|url|site|page|fetch|weather|rain|wttr|news|latest|price|docs?)\b/i.test(text)) {
+        addCategory('web');
+        matchedAny = true;
+    }
+
+    if (/\b(?:remind|reminder|alarm|schedule|automate|automation|cron|watch|watcher|monitor|every\s+\d+|daily\s+at|tomorrow|tonight|later)\b/i.test(text)) {
+        addCategory('scheduling');
+        matchedAny = true;
+    }
+
+    // Fallback for short/ambiguous follow-ups (e.g. "show it", "what happened", "check again")
+    if (!matchedAny) {
+        addCategory('files');
+        addCategory('discord');
+        addCategory('memory');
+        addCategory('web');
+    }
+
+    return Array.from(names);
+}
+
+/**
+ * Returns formatted Groq + Gemini tool arrays scoped to the inferred intent.
+ */
+function getToolsForQuery(query = '', extraCategories = []) {
+    const toolNames = inferToolNamesForQuery(query, extraCategories);
+    return {
+        toolNames,
+        groqTools: getGroqTools(toolNames),
+        geminiTools: getGeminiTools(toolNames)
+    };
+}
 
 /**
  * Returns tools formatted for OpenAI / Groq standard API.
  */
-function getGroqTools() {
-    return toolSpecs.map(spec => ({
+function getGroqTools(allowedNames = null) {
+    return _filterSpecs(allowedNames).map(spec => ({
         type: 'function',
         function: {
             name: spec.name,
@@ -486,7 +592,7 @@ function getGroqTools() {
 /**
  * Returns tools formatted for Google Gemini API schema.
  */
-function getGeminiTools() {
+function getGeminiTools(allowedNames = null) {
     // Map standard JSON schema type to Gemini uppercase type
     function convertSchema(paramObj) {
         if (!paramObj) return { type: 'OBJECT', properties: {} };
@@ -506,7 +612,7 @@ function getGeminiTools() {
     }
 
     return [{
-        functionDeclarations: toolSpecs.map(spec => ({
+        functionDeclarations: _filterSpecs(allowedNames).map(spec => ({
             name: spec.name,
             description: spec.description,
             parameters: convertSchema(spec.parameters)
@@ -945,6 +1051,32 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
                 return automationService.deleteAutomation(args.id, userId);
             }
 
+            case 'unlock_tools': {
+                const rawCats = String(args.categories || 'all')
+                    .toLowerCase()
+                    .split(/[,\s]+/)
+                    .map(s => s.trim())
+                    .filter(Boolean);
+                const unlockedSet = new Set();
+                if (rawCats.includes('all')) {
+                    toolSpecs.forEach(s => unlockedSet.add(s.name));
+                } else {
+                    for (const cat of rawCats) {
+                        const list = TOOL_CATEGORIES[cat];
+                        if (list) list.forEach(n => unlockedSet.add(n));
+                    }
+                }
+                const unlockedToolNames = Array.from(unlockedSet);
+                return {
+                    success: unlockedToolNames.length > 0,
+                    unlockedCategories: rawCats,
+                    unlockedTools: unlockedToolNames,
+                    message: unlockedToolNames.length > 0
+                        ? `Unlocked tools (${unlockedToolNames.join(', ')}). Proceed to invoke the required tool now.`
+                        : `Unknown category "${args.categories}". Valid categories: files, code_edit, discord, memory, web, scheduling, all.`
+                };
+            }
+
             default:
                 return { error: `Unknown tool: "${name}"` };
         }
@@ -955,6 +1087,9 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
 
 module.exports = {
     toolSpecs,
+    TOOL_CATEGORIES,
+    inferToolNamesForQuery,
+    getToolsForQuery,
     getGroqTools,
     getGeminiTools,
     executeTool

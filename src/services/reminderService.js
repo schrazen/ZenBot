@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const logger = require('../utils/logger');
 
 class ReminderService {
@@ -286,6 +287,44 @@ class ReminderService {
     }
 
     /**
+     * Snoozes a reminder by ID for a number of minutes and reactivates it.
+     */
+    snoozeReminder(id, minutes = 15, userId = null) {
+        const query = String(id).trim().toLowerCase();
+        const rem = this.reminders.find(r => r.id.toLowerCase() === query);
+        if (!rem) {
+            return { success: false, message: `No reminder found matching "${id}".` };
+        }
+        if (userId && rem.userId && rem.userId !== userId) {
+            return { success: false, message: 'Permission denied.' };
+        }
+        const dueAt = Date.now() + Math.max(1, Number(minutes) || 15) * 60 * 1000;
+        rem.completed = false;
+        rem.dueAt = dueAt;
+        rem.dueTimeStr = new Date(dueAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        this.save();
+        logger.info(`Reminder [${rem.id}] snoozed for ${minutes}m -> ${rem.dueTimeStr}`);
+        return { success: true, reminder: rem };
+    }
+
+    /**
+     * Marks a reminder as done/completed by ID.
+     */
+    completeReminder(id, userId = null) {
+        const query = String(id).trim().toLowerCase();
+        const rem = this.reminders.find(r => r.id.toLowerCase() === query);
+        if (!rem) {
+            return { success: false, message: `No reminder found matching "${id}".` };
+        }
+        if (userId && rem.userId && rem.userId !== userId) {
+            return { success: false, message: 'Permission denied.' };
+        }
+        rem.completed = true;
+        this.save();
+        return { success: true, reminder: rem };
+    }
+
+    /**
      * Clears all completed reminders for a user.
      */
     clearCompleted(userId) {
@@ -329,17 +368,33 @@ class ReminderService {
         for (const rem of dueReminders) {
             try {
                 let delivered = false;
+                const row = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`zen_rem_snooze:${rem.id}:15`)
+                        .setLabel('⏰ Snooze 15m')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId(`zen_rem_snooze:${rem.id}:60`)
+                        .setLabel('⏰ Snooze 1h')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId(`zen_rem_done:${rem.id}`)
+                        .setLabel('✅ Done')
+                        .setStyle(ButtonStyle.Success)
+                );
 
                 // 1. Try sending DM if it's owner or created in DM
                 if (rem.userId) {
                     try {
                         const user = await this.client.users.fetch(rem.userId);
                         if (user) {
-                            await user.send(
-                                `⏰ **REMINDER ALERT**\n\n` +
-                                `**Task:** ${rem.task}\n` +
-                                `*(Scheduled for ${rem.dueTimeStr})*`
-                            );
+                            await user.send({
+                                content:
+                                    `⏰ **REMINDER ALERT**\n\n` +
+                                    `**Task:** ${rem.task}\n` +
+                                    `*(Scheduled for ${rem.dueTimeStr})*`,
+                                components: [row]
+                            });
                             delivered = true;
                         }
                     } catch (dmErr) {
@@ -352,11 +407,13 @@ class ReminderService {
                     try {
                         const channel = await this.client.channels.fetch(rem.channelId);
                         if (channel && channel.isTextBased()) {
-                            await channel.send(
-                                `⏰ **REMINDER ALERT** <@${rem.userId}>\n\n` +
-                                `**Task:** ${rem.task}\n` +
-                                `*(Scheduled for ${rem.dueTimeStr})*`
-                            );
+                            await channel.send({
+                                content:
+                                    `⏰ **REMINDER ALERT** <@${rem.userId}>\n\n` +
+                                    `**Task:** ${rem.task}\n` +
+                                    `*(Scheduled for ${rem.dueTimeStr})*`,
+                                components: [row]
+                            });
                             delivered = true;
                         }
                     } catch (chErr) {

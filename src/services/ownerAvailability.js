@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const logger = require('../utils/logger');
 
 class OwnerAvailabilityService {
@@ -698,6 +698,21 @@ class OwnerAvailabilityService {
             .setFooter({ text: `Status: ${stateInfo.state} • ${stateInfo.reason}` })
             .setTimestamp();
 
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`zen_reply_modal:${channelId}`)
+                .setLabel('💬 Quick Reply')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(`zen_avail_online:${channelId}`)
+                .setLabel("🟢 I'm Online (Mute 1h)")
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`zen_avail_mute:${channelId}`)
+                .setLabel(`🔕 Mute #${channelName.slice(0, 15)} 1h`)
+                .setStyle(ButtonStyle.Secondary)
+        );
+
         // Try each configured owner ID until one succeeds (e.g. primary active account 871274613227798589)
         const orderedIds = [...ownerIds].sort((a, b) => (a === '871274613227798589' ? -1 : b === '871274613227798589' ? 1 : 0));
         let lastErr = null;
@@ -705,7 +720,7 @@ class OwnerAvailabilityService {
             try {
                 const ownerUser = await this.client.users.fetch(ownerId);
                 if (!ownerUser) continue;
-                await ownerUser.send({ embeds: [embed] });
+                await ownerUser.send({ embeds: [embed], components: [row] });
                 logger.info(`Dispatched DM alert to owner (${ownerId}) for ping from ${callerName} in #${channelName}`);
                 return;
             } catch (err) {

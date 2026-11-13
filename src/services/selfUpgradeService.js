@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const logger = require('../utils/logger');
 
 class SelfUpgradeService {
@@ -166,6 +166,26 @@ class SelfUpgradeService {
             .setTimestamp();
 
         return embed;
+    }
+
+    /**
+     * Builds interactive Discord Approve/Reject buttons for staged self-upgrade proposals.
+     */
+    buildProposalComponents(proposalsInput) {
+        const list = Array.isArray(proposalsInput) ? proposalsInput : [proposalsInput];
+        const targetId = list.length === 1 && list[0]?.id ? list[0].id : 'all';
+
+        const approveBtn = new ButtonBuilder()
+            .setCustomId(`zen_upg_approve:${targetId}`)
+            .setLabel(list.length > 1 ? `Approve All (${list.length})` : 'Approve & Apply')
+            .setStyle(ButtonStyle.Success);
+
+        const rejectBtn = new ButtonBuilder()
+            .setCustomId(`zen_upg_reject:${targetId}`)
+            .setLabel(list.length > 1 ? 'Reject All' : 'Reject')
+            .setStyle(ButtonStyle.Danger);
+
+        return [new ActionRowBuilder().addComponents(approveBtn, rejectBtn)];
     }
 
     /**

@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const logger = require('../utils/logger');
 
 class AutomationService {
@@ -23,8 +23,66 @@ class AutomationService {
         this.automations = [];
         this.ticker = null;
         this.isChecking = false;
+        this.eventsHooked = false;
+        this.lastChannelEventAt = new Map();
 
         this.load();
+    }
+
+    /**
+     * Marks real-time Discord event buffering active and records non-owner guild messages.
+     * Enables zero-token skip when watched channels had zero new messages since lastRun.
+     */
+    markEventsHooked() {
+        this.eventsHooked = true;
+    }
+
+    recordWatchedGuildEvent(message) {
+        this.eventsHooked = true;
+        if (!message || message.author?.bot || !message.guild) return;
+        if (this.ownerAvailability?.isOwner?.(message.author?.id)) return;
+        if (message.channel?.id) {
+            this.lastChannelEventAt.set(message.channel.id, Date.now());
+        }
+    }
+
+    /**
+     * Temporarily snoozes/mutes an automation by ID.
+     */
+    muteAutomation(id, durationMs = 60 * 60 * 1000) {
+        const auto = this.automations.find(a => a.id.toLowerCase() === String(id).trim().toLowerCase());
+        if (!auto) return { success: false, message: `No automation found matching "${id}".` };
+        auto.mutedUntil = Date.now() + durationMs;
+        this.save();
+        logger.info(`Automation [${auto.id}] snoozed for ${Math.round(durationMs / 60000)}m.`);
+        return { success: true, automation: auto };
+    }
+
+    /**
+     * Builds interactive action buttons attached to autonomous watcher alerts.
+     */
+    buildAlertComponents(auto) {
+        const row = new ActionRowBuilder();
+        const cursorChannels = Object.keys(auto?.state?.channelCursors || {});
+        if (cursorChannels.length > 0) {
+            row.addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`zen_reply_modal:${cursorChannels[0]}`)
+                    .setLabel('💬 Quick Reply')
+                    .setStyle(ButtonStyle.Primary)
+            );
+        }
+        row.addComponents(
+            new ButtonBuilder()
+                .setCustomId(`zen_auto_mute:${auto.id}:3600000`)
+                .setLabel('🔕 Snooze 1h')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`zen_auto_del:${auto.id}`)
+                .setLabel('🗑️ Disable')
+                .setStyle(ButtonStyle.Danger)
+        );
+        return [row];
     }
 
     load() {
@@ -242,7 +300,12 @@ class AutomationService {
         this.isChecking = true;
 
         const now = Date.now();
-        const dueList = this.automations.filter(a => a.active && a.scheduleMeta?.nextRun && now >= a.scheduleMeta.nextRun);
+        const dueList = this.automations.filter(a =>
+            a.active &&
+            (!a.mutedUntil || now >= a.mutedUntil) &&
+            a.scheduleMeta?.nextRun &&
+            now >= a.scheduleMeta.nextRun
+        );
 
         for (const auto of dueList) {
             try {
@@ -414,18 +477,51 @@ class AutomationService {
                 .setFooter({ text: 'Hermes Agent Autonomous Surveillance' })
                 .setTimestamp();
 
-            await this._sendAlert(auto, { embeds: [embed] });
+            await this._sendAlert(auto, { embeds: [embed], components: this.buildAlertComponents(auto) });
         }
     }
 
     async _runAgentTask(auto) {
-        const { getGroqTools, getGeminiTools, executeTool } = require('./llm/toolDefinitions');
+        const { getToolsForQuery, executeTool } = require('./llm/toolDefinitions');
         auto.state = auto.state || { channelCursors: {}, lastAlertValue: null, lastAlertAt: null };
         if (!auto.state.channelCursors) auto.state.channelCursors = {};
         const channelCheckStats = { checkedChannels: 0, totalNewMessages: 0, hadBaselineCursor: false };
 
         const avail = this.ownerAvailability ? this.ownerAvailability.getAvailabilityState() : { state: 'UNKNOWN', reason: '' };
         const prefContext = this.memoryManager?.preferences?.toPromptContext() || '';
+        const isDiscordWatcher = /discord\.com\/channels\//i.test(auto.url || '') || /\b(?:banorant|discord|server|channel|messages)\b/i.test(auto.prompt || '');
+
+        // Zero-token pre-gate for Discord watchers:
+        // 1. If Lance is currently AVAILABLE, sync channel cursors silently (0 LLM calls).
+        if (isDiscordWatcher && avail.state === 'AVAILABLE') {
+            if (this.channelHistory) {
+                for (const chId of Object.keys(auto.state.channelCursors)) {
+                    const ch = this.channelHistory.resolveTargetChannel(chId);
+                    if (ch) {
+                        const data = await this.channelHistory.fetchRecentTranscript(ch, 5, auto.state.channelCursors[chId]).catch(() => null);
+                        if (data?.latestMessageId) auto.state.channelCursors[chId] = data.latestMessageId;
+                    }
+                }
+            }
+            auto.lastStatus = 'checked_no_alert';
+            auto.lastResult = 'Skipped LLM check: Owner is currently AVAILABLE.';
+            logger.info(`Automation [${auto.id}] AgentTask pre-gated (0 LLM tokens): ${auto.lastResult}`);
+            return;
+        }
+
+        // 2. If real-time event buffering is active and watched cursor channels had zero non-owner messages since lastRun, skip LLM call.
+        const cursorIds = Object.keys(auto.state.channelCursors);
+        if (isDiscordWatcher && this.eventsHooked && cursorIds.length > 0 && auto.lastRun) {
+            const hasRecentEvent = cursorIds.some(chId => (this.lastChannelEventAt.get(chId) || 0) > auto.lastRun);
+            if (!hasRecentEvent) {
+                auto.lastStatus = 'checked_no_alert';
+                auto.lastResult = 'Skipped LLM check: No new non-owner messages buffered since last run.';
+                logger.info(`Automation [${auto.id}] AgentTask event-gated (0 LLM tokens): ${auto.lastResult}`);
+                return;
+            }
+        }
+
+        const { groqTools, geminiTools } = getToolsForQuery(auto.prompt, ['discord', 'web']);
 
         const res = await this.llmManager.chatWithAgent([
             {
@@ -445,8 +541,8 @@ class AutomationService {
                 content: auto.prompt
             }
         ], {
-            tools: getGroqTools(),
-            geminiTools: getGeminiTools(),
+            tools: groqTools,
+            geminiTools,
             executeTool: (name, args) => executeTool(name, args, {
                 config: this.config,
                 workspaceService: this.workspaceService,
@@ -491,7 +587,8 @@ class AutomationService {
             const pendingList = this.selfUpgradeService.getPendingProposals().filter(p => stagedUpgrades.includes(p.id));
             if (pendingList.length > 0) {
                 const upgEmbed = this.selfUpgradeService.buildProposalEmbed(pendingList);
-                await this._sendAlert(auto, { embeds: [upgEmbed] });
+                const upgComponents = this.selfUpgradeService.buildProposalComponents(pendingList);
+                await this._sendAlert(auto, { embeds: [upgEmbed], components: upgComponents });
             }
         }
 
@@ -514,7 +611,7 @@ class AutomationService {
             .setFooter({ text: `Automated Task • ${auto.scheduleStr}` })
             .setTimestamp();
 
-        await this._sendAlert(auto, { embeds: [embed] });
+        await this._sendAlert(auto, { embeds: [embed], components: this.buildAlertComponents(auto) });
     }
 
     async _sendAlert(auto, payload) {

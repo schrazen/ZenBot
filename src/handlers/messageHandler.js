@@ -1,3 +1,4 @@
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { splitMessage } = require('../utils/chunker');
 const logger = require('../utils/logger');
 
@@ -80,6 +81,65 @@ class MessageHandler {
         const botMentionRegex = new RegExp(`<@!?${this.client.user.id}>`, 'g');
         text = text.replace(botMentionRegex, '').trim();
         return text;
+    }
+
+    /**
+     * Downloads supported image, voice/audio, and PDF attachments (up to 12 MB, max 3 files)
+     * as base64 inlineData payloads for multimodal Gemini inference.
+     */
+    async extractMultimodalAttachments(message) {
+        if (!message?.attachments || message.attachments.size === 0) return [];
+
+        const extToMime = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp',
+            '.gif': 'image/gif',
+            '.ogg': 'audio/ogg',
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.m4a': 'audio/mp4',
+            '.pdf': 'application/pdf'
+        };
+        const supportedMimes = new Set([
+            'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif',
+            'audio/ogg', 'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/mp4', 'audio/x-m4a',
+            'application/pdf'
+        ]);
+        const maxBytes = 12 * 1024 * 1024;
+        const results = [];
+
+        for (const att of message.attachments.values()) {
+            if (results.length >= 3) break;
+            if (!att?.url || (att.size && att.size > maxBytes)) continue;
+
+            const rawType = (att.contentType || '').split(';')[0].trim().toLowerCase();
+            const lowerName = (att.name || '').toLowerCase();
+            const matchedExt = Object.keys(extToMime).find(ext => lowerName.endsWith(ext));
+            const mimeType = supportedMimes.has(rawType)
+                ? (rawType === 'image/jpg' ? 'image/jpeg' : rawType)
+                : (matchedExt ? extToMime[matchedExt] : null);
+
+            if (!mimeType) continue;
+
+            try {
+                const res = await fetch(att.url);
+                if (!res.ok) continue;
+                const arrayBuf = await res.arrayBuffer();
+                if (arrayBuf.byteLength > maxBytes) continue;
+                results.push({
+                    name: att.name || 'attachment',
+                    mimeType,
+                    data: Buffer.from(arrayBuf).toString('base64'),
+                    size: arrayBuf.byteLength
+                });
+            } catch (err) {
+                logger.warn(`Could not fetch multimodal attachment "${att.name}": ${err.message}`);
+            }
+        }
+
+        return results;
     }
 
     /**
@@ -296,7 +356,7 @@ class MessageHandler {
             return await message.reply(`📚 **Review Started** [Deck: *${review.deckName}* | ${review.totalCards} cards]\nType your answer directly in chat, or type **"stop"** to quit anytime.\n\n**${review.description}**`);
         }
 
-        // Check for attached text/markdown file
+        // Check for attached text/markdown file or multimodal attachments (images, voice notes, PDFs)
         let attachmentText = null;
         if (message.attachments?.size > 0) {
             const textAtt = message.attachments.find(att =>
@@ -311,6 +371,7 @@ class MessageHandler {
                 }
             }
         }
+        const multimodalAttachments = isOwner ? await this.extractMultimodalAttachments(message) : [];
 
         // 6. Natural Notes Ingestion Trigger (Mode 1: Ingestion)
         const notesTriggerRegex = /^(?:notes|study|acads|flashcards|save notes|add notes):\s*([\s\S]*)$/i;
@@ -349,9 +410,17 @@ class MessageHandler {
             }
         }
 
-        // 8. If no text was provided (e.g. user just pinged @ZenBot):
+        // 8. If no text was provided (e.g. user just pinged @ZenBot or sent a voice/image attachment):
         let effectiveQuery = userQuery;
-        if (!effectiveQuery && !attachmentText) {
+        if (!effectiveQuery && !attachmentText && multimodalAttachments.length > 0) {
+            const hasAudio = multimodalAttachments.some(a => a.mimeType.startsWith('audio/'));
+            const hasPdf = multimodalAttachments.some(a => a.mimeType === 'application/pdf');
+            effectiveQuery = hasAudio
+                ? 'Transcribe this voice message accurately, then respond directly and execute any request inside it.'
+                : (hasPdf
+                    ? 'Inspect and summarize this attached PDF document clearly for Lance.'
+                    : 'Analyze the attached image(s)/screenshot(s) thoroughly and help Lance with whatever is shown.');
+        } else if (!effectiveQuery && !attachmentText) {
             if (referencedContext) {
                 // User clicked reply and tagged bot without extra text
                 effectiveQuery = `[React to and address this referenced message]`;
@@ -372,6 +441,10 @@ class MessageHandler {
             } else {
                 return;
             }
+        }
+
+        if (attachmentText) {
+            effectiveQuery = `${effectiveQuery ? effectiveQuery + '\n\n' : ''}[Attached File Content]:\n${attachmentText.slice(0, 6000)}`;
         }
 
         // Only allow owner to inject persistent inline memories & learn feedback rules
@@ -441,6 +514,13 @@ class MessageHandler {
                 ownerAvailabilityState
             });
 
+            if (multimodalAttachments.length > 0 && messages.length > 0) {
+                const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+                if (lastUserMsg) {
+                    lastUserMsg.attachments = multimodalAttachments;
+                }
+            }
+
             // Execute LLM inference (with Agent tools for owner Lance, standard chat for server members)
             let response;
             const autonomyEnabled = this.config.autonomy?.enabled !== false;
@@ -463,7 +543,7 @@ class MessageHandler {
                 } else if (rawArgs && typeof rawArgs === 'object') {
                     parsed = rawArgs;
                 }
-                const detail = parsed.filePath || parsed.query || parsed.target || parsed.url || parsed.command || parsed.state || parsed.task || parsed.fact || parsed.rule || parsed.project || '';
+                const detail = parsed.filePath || parsed.query || parsed.target || parsed.url || parsed.command || parsed.state || parsed.task || parsed.fact || parsed.rule || parsed.project || parsed.categories || '';
                 return detail ? `\`${toolName}\` (${String(detail).slice(0, 50)})` : `\`${toolName}\``;
             };
 
@@ -498,9 +578,8 @@ class MessageHandler {
             };
 
             if (useAgentLoop) {
-                const { getGroqTools, getGeminiTools, executeTool } = require('../services/llm/toolDefinitions');
-                const groqTools = getGroqTools();
-                const geminiTools = getGeminiTools();
+                const { getToolsForQuery, executeTool } = require('../services/llm/toolDefinitions');
+                const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery);
 
                 response = await this.llmManager.chatWithAgent(messages, {
                     tools: groqTools,
@@ -569,11 +648,44 @@ class MessageHandler {
                 replyText = 'Done.';
             }
 
+            // Build quick-send buttons if find_files found files and send_file_to_owner wasn't already invoked
+            const replyComponents = [];
+            if (isOwner && Array.isArray(response.executedTools)) {
+                const alreadySentFile = response.executedTools.some(t => t.name === 'send_file_to_owner' && t.result?.success);
+                const findCall = [...response.executedTools].reverse().find(t => t.name === 'find_files' && Array.isArray(t.result?.matches) && t.result.matches.length > 0);
+                if (!alreadySentFile && findCall) {
+                    const row = new ActionRowBuilder();
+                    const seenIds = new Set();
+                    for (const match of findCall.result.matches) {
+                        if (row.components.length >= 4) break;
+                        const matchPath = String(match.path || '');
+                        if (!matchPath || matchPath.length > 85) continue;
+                        const customId = `zen_send_file:${matchPath}`;
+                        if (seenIds.has(customId)) continue;
+                        seenIds.add(customId);
+                        row.addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(customId)
+                                .setLabel(`📎 Send ${match.name || 'file'}`.slice(0, 75))
+                                .setStyle(ButtonStyle.Secondary)
+                        );
+                    }
+                    if (row.components.length > 0) {
+                        replyComponents.push(row);
+                    }
+                }
+            }
+
             // Split into Discord-compliant chunks
             const chunks = splitMessage(replyText, 1950);
 
-            for (const chunk of chunks) {
-                await message.reply(chunk);
+            for (let i = 0; i < chunks.length; i++) {
+                const isLastChunk = i === chunks.length - 1;
+                if (isLastChunk && replyComponents.length > 0) {
+                    await message.reply({ content: chunks[i], components: replyComponents });
+                } else {
+                    await message.reply(chunks[i]);
+                }
             }
 
             // Smart Auto-Continuation: If the model cut off mid-sentence or hit max_tokens,
@@ -605,10 +717,11 @@ class MessageHandler {
 
                 let nextResponse;
                 if (useAgentLoop) {
-                    const { getGroqTools, getGeminiTools, executeTool } = require('../services/llm/toolDefinitions');
+                    const { getToolsForQuery, executeTool } = require('../services/llm/toolDefinitions');
+                    const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery);
                     nextResponse = await this.llmManager.chatWithAgent(continuationMessages, {
-                        tools: getGroqTools(),
-                        geminiTools: getGeminiTools(),
+                        tools: groqTools,
+                        geminiTools,
                         onProgress: updateLiveProgress,
                         executeTool: (name, args) => executeTool(name, args, {
                             config: this.config,
@@ -671,7 +784,8 @@ class MessageHandler {
                     const pendingList = this.selfUpgradeService.getPendingProposals().filter(p => stagedIds.includes(p.id));
                     if (pendingList.length > 0) {
                         const proposalEmbed = this.selfUpgradeService.buildProposalEmbed(pendingList);
-                        await message.channel.send({ embeds: [proposalEmbed] });
+                        const proposalComponents = this.selfUpgradeService.buildProposalComponents(pendingList);
+                        await message.channel.send({ embeds: [proposalEmbed], components: proposalComponents });
                     }
                 }
             }
