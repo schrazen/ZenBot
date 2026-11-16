@@ -1,3 +1,4 @@
+const { readSseJsonStream } = require('../../utils/sseStream');
 const logger = require('../../utils/logger');
 
 class GeminiProvider {
@@ -109,8 +110,11 @@ class GeminiProvider {
             payload.tools = options.geminiTools;
         }
 
+        const useStream = Boolean(typeof options.onDelta === 'function' && (!options.geminiTools || options.geminiTools.length === 0));
         const startTime = Date.now();
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${this.apiKey}`;
+        const url = useStream
+            ? `https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:streamGenerateContent?alt=sse&key=${this.apiKey}`
+            : `https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${this.apiKey}`;
 
         try {
             const res = await fetch(url, {
@@ -121,9 +125,9 @@ class GeminiProvider {
                 body: JSON.stringify(payload)
             });
 
-            const data = await res.json();
-
             if (!res.ok) {
+                let data = {};
+                try { data = await res.json(); } catch (e) {}
                 // If the primary model failed (e.g. 404 on newer preview or rate limit), try fallback
                 if (modelToUse !== this.fallbackModel && (res.status === 404 || res.status === 429 || res.status === 400)) {
                     logger.warn(`Gemini model ${modelToUse} failed (${res.status}). Retrying with fallback ${this.fallbackModel}...`);
@@ -141,6 +145,41 @@ class GeminiProvider {
                 throw new Error(`Gemini API error: ${errMessage}`);
             }
 
+            if (useStream) {
+                let textPart = '';
+                let rawFinish = 'STOP';
+                let usage = null;
+                await readSseJsonStream(res, async (chunk) => {
+                    const candidate = chunk.candidates?.[0];
+                    const parts = candidate?.content?.parts || [];
+                    for (const part of parts) {
+                        if (part.text) {
+                            textPart += part.text;
+                            try { await options.onDelta(textPart); } catch (e) {}
+                        }
+                    }
+                    if (candidate?.finishReason) rawFinish = candidate.finishReason;
+                    if (chunk.usageMetadata) usage = chunk.usageMetadata;
+                });
+
+                if (!textPart.trim()) {
+                    throw new Error('Gemini returned an empty response.');
+                }
+
+                const latencyMs = Date.now() - startTime;
+                this.lastUsage = usage;
+                return {
+                    content: textPart.trim(),
+                    toolCalls: null,
+                    finishReason: (rawFinish === 'MAX_TOKENS' || rawFinish === 'length') ? 'length' : 'stop',
+                    provider: 'gemini',
+                    model: modelToUse,
+                    latencyMs,
+                    usage
+                };
+            }
+
+            const data = await res.json();
             const candidate = data.candidates?.[0];
             const parts = candidate?.content?.parts || [];
             let textPart = '';

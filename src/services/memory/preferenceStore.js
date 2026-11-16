@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { writeJsonAtomicSync } = require('../../utils/atomicWrite');
 const logger = require('../../utils/logger');
 
 class PreferenceStore {
@@ -26,9 +27,7 @@ class PreferenceStore {
 
     save() {
         try {
-            const dir = path.dirname(this.storagePath);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(this.storagePath, JSON.stringify(this.preferences, null, 2), 'utf8');
+            writeJsonAtomicSync(this.storagePath, this.preferences);
         } catch (e) {
             logger.error(`Failed to save preferences: ${e.message}`);
         }

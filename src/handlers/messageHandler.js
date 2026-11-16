@@ -52,13 +52,19 @@ class MessageHandler {
         // Dedup recent message events
         if (this.processedMessageIds.has(message.id)) return false;
 
+        const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
+
+        // In Standby Mode, ignore all server channels & quizzes; only stay reachable for owner DMs (so Lance can wake ZenBot)
+        if (this.config?.runtime?.standbyMode) {
+            return isDM && this.isOwner(message);
+        }
+
         // 1. Active study review session in this channel (anyone in channel can participate)
         if (this.studyService && this.studyService.hasActiveSession(message.channel.id)) {
             return true;
         }
 
         // 2. Direct Messages (DMs) - STRICTLY OWNER ONLY
-        const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
         if (isDM) {
             return this.isOwner(message);
         }
@@ -223,6 +229,21 @@ class MessageHandler {
 
         const userQuery = this.cleanContent(message);
         const speakerName = message.member?.displayName || message.author.username;
+        const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
+
+        // 2a. Owner Deterministic DM Lifecycle Control (Standby, Wake, Shutdown)
+        if (isOwner && isDM && this.commandHandler?.cmdLifecycle) {
+            const cleanLife = userQuery.trim();
+            if (this.config?.runtime?.standbyMode && /^(?:wake(?:\s+up)?|resume|turn\s*on|online|back|start)[.!]*$/i.test(cleanLife)) {
+                return await this.commandHandler.cmdLifecycle(message, 'wake');
+            }
+            if (/^(?:turn\s*off\s+completely|full\s*shutdown|kill\s+process|power\s*off\s+completely)[.!]*$/i.test(cleanLife)) {
+                return await this.commandHandler.cmdLifecycle(message, 'shutdown');
+            }
+            if (/^(?:stand\s*by|pause\s+bot|shut\s*down(?:\s+for\s+now)?|turn\s*off(?:\s+for\s+now)?|no\s+i\s+mean\s+turn\s+off|power\s*off)[.!]*$/i.test(cleanLife)) {
+                return await this.commandHandler.cmdLifecycle(message, 'standby', cleanLife);
+            }
+        }
 
         // 2b. Owner Self-Upgrade Approval / Rejection Gate
         if (isOwner && this.selfUpgradeService && this.selfUpgradeService.hasPendingProposals()) {
@@ -512,7 +533,6 @@ class MessageHandler {
             }
 
             // Build multi-tier context with projects, temporal awareness, live chat transcript, and active study session
-            const isDM = !message.guild || (typeof message.channel.isDMBased === 'function' && message.channel.isDMBased());
             const activeSession = this.studyService?.getSession(message.channel.id) || null;
             const ownerAvailabilityState = this.ownerAvailability ? this.ownerAvailability.getAvailabilityState() : null;
             const messages = this.memoryManager.buildMessages(message.channel.id, promptQuery, liveTranscriptContext, {
@@ -585,6 +605,22 @@ class MessageHandler {
                 } catch (e) {}
             };
 
+            const onStreamDelta = async (accumulatedText) => {
+                try {
+                    const cleanPreview = String(accumulatedText || '').trim();
+                    if (cleanPreview.length < 40 || progressLines.length > 0) return;
+                    const nowMs = Date.now();
+                    if ((nowMs - lastProgressUpdateMs) < 850) return;
+                    lastProgressUpdateMs = nowMs;
+                    const snippet = cleanPreview.length > 1850 ? cleanPreview.slice(0, 1850) + '...' : cleanPreview;
+                    if (!progressMsg) {
+                        progressMsg = await message.reply(`${snippet} ▌`);
+                    } else {
+                        await progressMsg.edit(`${snippet} ▌`);
+                    }
+                } catch (e) {}
+            };
+
             if (useAgentLoop) {
                 const { getToolsForQuery, executeTool } = require('../services/llm/toolDefinitions');
                 const { groqTools, geminiTools } = getToolsForQuery(effectiveQuery, { isDM, isOwner });
@@ -593,6 +629,7 @@ class MessageHandler {
                     tools: groqTools,
                     geminiTools,
                     onProgress: updateLiveProgress,
+                    onDelta: onStreamDelta,
                     executeTool: (name, args) => executeTool(name, args, {
                         config: this.config,
                         workspaceService: this.workspaceService,
@@ -603,6 +640,7 @@ class MessageHandler {
                         automationService: this.automationService,
                         ownerAvailability: this.ownerAvailability,
                         memoryManager: this.memoryManager,
+                        botProfileService: this.commandHandler?.botProfileService,
                         client: this.client,
                         userId: message.author.id,
                         username: message.author.username,
@@ -612,15 +650,7 @@ class MessageHandler {
                     maxSteps: 10
                 });
             } else {
-                response = await this.llmManager.chat(messages);
-            }
-
-            // Clean up live progress indicator message before posting final response
-            if (progressMsg) {
-                try {
-                    await progressMsg.delete();
-                } catch (e) {}
-                progressMsg = null;
+                response = await this.llmManager.chat(messages, { onDelta: onStreamDelta });
             }
 
             let replyText = (response.content || '').trim();
@@ -657,7 +687,7 @@ class MessageHandler {
                 replyText = 'Done.';
             }
 
-            // Build interactive Discord buttons (quick file-send buttons + status/availability buttons in DM)
+            // Build interactive Discord buttons (quick file-send buttons, status buttons, lifecycle buttons in DM)
             const replyComponents = [];
             if (isOwner) {
                 const executed = Array.isArray(response.executedTools) ? response.executedTools : [];
@@ -702,19 +732,17 @@ class MessageHandler {
                 if ((askedStatusOrButtons || ranAvailTool) && this.ownerAvailability?.buildStatusComponents) {
                     replyComponents.push(...this.ownerAvailability.buildStatusComponents());
                 }
-            }
 
-            // Split into Discord-compliant chunks
-            const chunks = splitMessage(replyText, 1950);
-
-            for (let i = 0; i < chunks.length; i++) {
-                const isLastChunk = i === chunks.length - 1;
-                if (isLastChunk && replyComponents.length > 0) {
-                    await message.reply({ content: chunks[i], components: replyComponents });
-                } else {
-                    await message.reply(chunks[i]);
+                const ranLifecycleTool = executed.some(t => t.name === 'control_bot_lifecycle');
+                if (ranLifecycleTool && this.commandHandler?.buildLifecycleComponents && replyComponents.length < 5) {
+                    replyComponents.push(...this.commandHandler.buildLifecycleComponents());
                 }
             }
+
+            // Split into Discord-compliant chunks; reuse progressMsg in-place when editing cleanly
+            const chunks = splitMessage(replyText, 1950);
+            await this._sendChunkedReply(message, progressMsg, chunks, replyComponents);
+            progressMsg = null;
 
             // Smart Auto-Continuation: If the model cut off mid-sentence or hit max_tokens,
             // automatically continue in a follow-up message (and execute any pending tools).
@@ -761,6 +789,7 @@ class MessageHandler {
                             automationService: this.automationService,
                             ownerAvailability: this.ownerAvailability,
                             memoryManager: this.memoryManager,
+                            botProfileService: this.commandHandler?.botProfileService,
                             client: this.client,
                             userId: message.author.id,
                             username: message.author.username,
@@ -828,6 +857,33 @@ class MessageHandler {
         } catch (error) {
             logger.error(`Failed to generate response: ${error.message}`);
             await message.reply(`Error: ${error.message}`);
+        }
+    }
+
+    /**
+     * Sends chunked replies cleanly, editing the live progress/stream message in-place when possible.
+     */
+    async _sendChunkedReply(message, progressMsg, chunks, replyComponents = []) {
+        let startIdx = 0;
+        if (progressMsg) {
+            try {
+                await progressMsg.edit({
+                    content: chunks[0],
+                    ...(chunks.length === 1 && replyComponents.length > 0 ? { components: replyComponents } : {})
+                });
+                startIdx = 1;
+            } catch (err) {
+                try { await progressMsg.delete(); } catch (e) {}
+            }
+        }
+
+        for (let i = startIdx; i < chunks.length; i++) {
+            const isLastChunk = i === chunks.length - 1;
+            if (isLastChunk && replyComponents.length > 0) {
+                await message.reply({ content: chunks[i], components: replyComponents });
+            } else {
+                await message.reply(chunks[i]);
+            }
         }
     }
 }

@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags } = require('discord.js');
 const { splitMessage } = require('../utils/chunker');
+const lifecycle = require('../utils/lifecycle');
 const logger = require('../utils/logger');
 
 class CommandHandler {
@@ -274,6 +275,23 @@ class CommandHandler {
             case 'exec':
                 if (!(await this._verifyFileAccessOrReply(message))) return;
                 return await this.cmdRun(message, argText);
+            case 'standby':
+            case 'pause':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can toggle Standby mode.');
+                return await this.cmdLifecycle(message, 'standby', argText);
+            case 'wake':
+            case 'resume':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can wake ZenBot.');
+                return await this.cmdLifecycle(message, 'wake', argText);
+            case 'shutdown':
+            case 'turnoff':
+            case 'poweroff':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can shut down ZenBot.');
+                return await this.cmdLifecycle(message, 'shutdown', argText);
+            case 'restart':
+            case 'reboot':
+                if (!this.isOwner(message)) return await message.reply('Only Lance (bot owner) can restart ZenBot.');
+                return await this.cmdLifecycle(message, 'restart', argText);
             default:
                 return await message.reply(`Unknown command \`!${cmd}\`. Use \`!help\` to see the full list.`);
         }
@@ -454,6 +472,16 @@ class CommandHandler {
                         .setCustomId('zen_panel:reminders')
                         .setLabel('Reminders')
                         .setEmoji('⏰')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId(this.config?.runtime?.standbyMode ? 'zen_lifecycle:wake' : 'zen_lifecycle:standby')
+                        .setLabel(this.config?.runtime?.standbyMode ? 'Wake Up' : 'Standby')
+                        .setEmoji(this.config?.runtime?.standbyMode ? '🟢' : '⏸️')
+                        .setStyle(this.config?.runtime?.standbyMode ? ButtonStyle.Success : ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId('zen_lifecycle:restart')
+                        .setLabel('Restart')
+                        .setEmoji('🔄')
                         .setStyle(ButtonStyle.Secondary)
                 )
             );
@@ -463,6 +491,58 @@ class CommandHandler {
         }
 
         return await message.reply({ embeds: [embed], components });
+    }
+
+    buildLifecycleComponents() {
+        const inStandby = Boolean(this.config?.runtime?.standbyMode);
+        return [
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(inStandby ? 'zen_lifecycle:wake' : 'zen_lifecycle:standby')
+                    .setLabel(inStandby ? 'Wake ZenBot' : 'Standby Mode')
+                    .setEmoji(inStandby ? '🟢' : '⏸️')
+                    .setStyle(inStandby ? ButtonStyle.Success : ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('zen_lifecycle:restart')
+                    .setLabel('Restart Process')
+                    .setEmoji('🔄')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('zen_lifecycle:shutdown')
+                    .setLabel('Full Power Off')
+                    .setEmoji('🛑')
+                    .setStyle(ButtonStyle.Danger)
+            )
+        ];
+    }
+
+    async cmdLifecycle(message, action = 'standby', reason = null) {
+        if (action === 'standby') {
+            const res = lifecycle.applyStandbyMode(this.config, { client: this.client, reason: reason || null });
+            return await message.reply({ content: `⏸️ ${res.message}`, components: this.buildLifecycleComponents() });
+        }
+        if (action === 'wake') {
+            const res = lifecycle.applyWakeMode(this.config, { client: this.client, botProfileService: this.botProfileService });
+            return await message.reply({ content: `🟢 ${res.message}`, components: this.buildLifecycleComponents() });
+        }
+        if (action === 'shutdown') {
+            const res = lifecycle.scheduleShutdown(this.config, {
+                client: this.client,
+                ownerAvailability: this.ownerAvailability,
+                reminderService: this.reminderService,
+                automationService: this.automationService
+            });
+            return await message.reply(`🛑 ${res.message}`);
+        }
+        if (action === 'restart') {
+            const res = lifecycle.scheduleRestart(this.config, {
+                client: this.client,
+                ownerAvailability: this.ownerAvailability,
+                reminderService: this.reminderService,
+                automationService: this.automationService
+            });
+            return await message.reply(`🔄 ${res.message}`);
+        }
     }
 
     async cmdLimits(message) {
@@ -1714,7 +1794,7 @@ class CommandHandler {
             logger.warn(`Rejected DM slash command from unauthorized user ${interaction.user.tag} (${interaction.user.id})`);
             return await interaction.reply({
                 content: 'ZenBot direct messages are private and restricted to the bot owner.',
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
         }
 
@@ -2018,7 +2098,7 @@ class CommandHandler {
             }
         } catch (err) {
             logger.error(`Error executing slash command /${cmd}:`, err);
-            const errReply = { content: `Error executing command: ${err.message}`, ephemeral: true };
+            const errReply = { content: `Error executing command: ${err.message}`, flags: MessageFlags.Ephemeral };
             if (interaction.deferred || isDeferred) {
                 return await interaction.editReply(errReply);
             } else if (!interaction.replied) {
@@ -2764,13 +2844,14 @@ class CommandHandler {
         if (!this.isOwner(interaction)) {
             return await interaction.reply({
                 content: 'Only Lance (bot owner) can use ZenBot interactive controls.',
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             });
         }
 
         const customId = interaction.customId || '';
         const parts = customId.split(':');
         const action = parts[0];
+        const ephFlags = interaction.guild ? { flags: MessageFlags.Ephemeral } : {};
 
         try {
             if (action === 'zen_reply_modal') {
@@ -2799,9 +2880,9 @@ class CommandHandler {
 
             if (action === 'zen_upg_approve' || action === 'zen_upg_reject') {
                 if (!this.selfUpgradeService) {
-                    return await interaction.reply({ content: 'SelfUpgradeService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ content: 'SelfUpgradeService is not initialized.', flags: MessageFlags.Ephemeral });
                 }
-                await interaction.deferReply({ ephemeral: false });
+                await interaction.deferReply();
                 const targetId = parts[1] || 'all';
 
                 if (action === 'zen_upg_approve') {
@@ -2831,7 +2912,7 @@ class CommandHandler {
 
             if (action === 'zen_avail_online' || action === 'zen_avail_mute') {
                 if (!this.ownerAvailability) {
-                    return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', flags: MessageFlags.Ephemeral });
                 }
                 const targetChannelId = parts[1] || 'global';
                 if (action === 'zen_avail_online') {
@@ -2839,73 +2920,73 @@ class CommandHandler {
                     this.ownerAvailability.setManualState('on', 'Confirmed online via quick button');
                     return await interaction.reply({
                         content: '🟢 Status set to **AVAILABLE** and AFK auto-replies muted globally for **1 hour**.',
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 } else {
                     this.ownerAvailability.suppressChannel(targetChannelId, 60 * 60 * 1000);
                     return await interaction.reply({
                         content: `🔕 Muted AFK auto-replies for channel \`${targetChannelId}\` for **1 hour**.`,
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 }
             }
 
             if (action === 'zen_auto_mute' || action === 'zen_auto_del') {
                 if (!this.automationService) {
-                    return await interaction.reply({ content: 'AutomationService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ content: 'AutomationService is not initialized.', flags: MessageFlags.Ephemeral });
                 }
                 const autoId = parts[1];
                 if (action === 'zen_auto_mute') {
                     const durationMs = parseInt(parts[2] || '3600000', 10) || 3600000;
                     const res = this.automationService.muteAutomation(autoId, durationMs);
-                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, ephemeral: true });
+                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, flags: MessageFlags.Ephemeral });
                     return await interaction.reply({
                         content: `🔕 Snoozed **"${res.automation.name}"** for **${Math.round(durationMs / 60000)}m**.`,
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 } else {
                     const res = this.automationService.deleteAutomation(autoId, interaction.user.id);
-                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, ephemeral: true });
+                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, flags: MessageFlags.Ephemeral });
                     try { await interaction.message.edit({ components: [] }); } catch (e) {}
                     return await interaction.reply({
                         content: `🗑️ Disabled & deleted automation **"${res.removed.name}"**.`,
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 }
             }
 
             if (action === 'zen_rem_snooze' || action === 'zen_rem_done') {
                 if (!this.reminderService) {
-                    return await interaction.reply({ content: 'ReminderService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ content: 'ReminderService is not initialized.', flags: MessageFlags.Ephemeral });
                 }
                 const remId = parts[1];
                 if (action === 'zen_rem_snooze') {
                     const mins = parseInt(parts[2] || '15', 10) || 15;
                     const res = this.reminderService.snoozeReminder(remId, mins, interaction.user.id);
-                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, ephemeral: true });
+                    if (!res.success) return await interaction.reply({ content: `⚠️ ${res.message}`, flags: MessageFlags.Ephemeral });
                     return await interaction.reply({
                         content: `⏰ Snoozed **"${res.reminder.task}"** for **${mins}m** (next alert: **${res.reminder.dueTimeStr}**).`,
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 } else {
                     const res = this.reminderService.completeReminder(remId, interaction.user.id);
                     try { await interaction.message.edit({ components: [] }); } catch (e) {}
                     return await interaction.reply({
                         content: res.success ? `✅ Marked reminder **"${res.reminder.task}"** complete.` : `✅ Reminder marked complete.`,
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 }
             }
 
             if (action === 'zen_avail_set') {
                 if (!this.ownerAvailability) {
-                    return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', flags: MessageFlags.Ephemeral });
                 }
                 const targetMode = (parts[1] || 'auto').toLowerCase();
                 const mapMode = { online: 'on', afk: 'away', sleep: 'sleep', auto: 'auto' };
                 const res = this.ownerAvailability.setManualState(mapMode[targetMode] || 'auto', targetMode === 'online' ? 'Confirmed online via button' : null);
                 if (res?.error) {
-                    return await interaction.reply({ content: `⚠️ ${res.error}`, ephemeral: true });
+                    return await interaction.reply({ content: `⚠️ ${res.error}`, flags: MessageFlags.Ephemeral });
                 }
                 if (targetMode === 'online') {
                     this.ownerAvailability.suppressChannel('global', 60 * 60 * 1000);
@@ -2916,42 +2997,71 @@ class CommandHandler {
                     content: `✅ ${res.message}`,
                     embeds: [embed],
                     components,
-                    ephemeral: Boolean(interaction.guild)
+                    ...ephFlags
                 });
             }
 
             if (action === 'zen_panel') {
                 const section = (parts[1] || 'availability').toLowerCase();
-                const isGuild = Boolean(interaction.guild);
                 if (section === 'availability') {
-                    if (!this.ownerAvailability) return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', ephemeral: true });
+                    if (!this.ownerAvailability) return await interaction.reply({ content: 'OwnerAvailabilityService is not initialized.', flags: MessageFlags.Ephemeral });
                     return await interaction.reply({
                         embeds: [this.ownerAvailability.getStatusEmbed()],
                         components: this.ownerAvailability.buildStatusComponents ? this.ownerAvailability.buildStatusComponents() : [],
-                        ephemeral: isGuild
+                        ...ephFlags
                     });
                 }
                 if (section === 'automations') {
-                    if (!this.automationService) return await interaction.reply({ content: 'AutomationService is not initialized.', ephemeral: true });
-                    return await interaction.reply({ ...this._buildAutomationListPayload(interaction.user.id), ephemeral: isGuild });
+                    if (!this.automationService) return await interaction.reply({ content: 'AutomationService is not initialized.', flags: MessageFlags.Ephemeral });
+                    return await interaction.reply({ ...this._buildAutomationListPayload(interaction.user.id), ...ephFlags });
                 }
                 if (section === 'reminders') {
-                    if (!this.reminderService) return await interaction.reply({ content: 'ReminderService is not initialized.', ephemeral: true });
-                    return await interaction.reply({ ...this._buildReminderListPayload(interaction.user.id), ephemeral: isGuild });
+                    if (!this.reminderService) return await interaction.reply({ content: 'ReminderService is not initialized.', flags: MessageFlags.Ephemeral });
+                    return await interaction.reply({ ...this._buildReminderListPayload(interaction.user.id), ...ephFlags });
+                }
+            }
+
+            if (action === 'zen_lifecycle') {
+                const mode = (parts[1] || 'standby').toLowerCase();
+                if (mode === 'standby') {
+                    const res = lifecycle.applyStandbyMode(this.config, { client: this.client });
+                    return await interaction.reply({ content: `⏸️ ${res.message}`, components: this.buildLifecycleComponents(), ...ephFlags });
+                }
+                if (mode === 'wake') {
+                    const res = lifecycle.applyWakeMode(this.config, { client: this.client, botProfileService: this.botProfileService });
+                    return await interaction.reply({ content: `🟢 ${res.message}`, components: this.buildLifecycleComponents(), ...ephFlags });
+                }
+                if (mode === 'shutdown') {
+                    const res = lifecycle.scheduleShutdown(this.config, {
+                        client: this.client,
+                        ownerAvailability: this.ownerAvailability,
+                        reminderService: this.reminderService,
+                        automationService: this.automationService
+                    });
+                    return await interaction.reply({ content: `🛑 ${res.message}`, ...ephFlags });
+                }
+                if (mode === 'restart') {
+                    const res = lifecycle.scheduleRestart(this.config, {
+                        client: this.client,
+                        ownerAvailability: this.ownerAvailability,
+                        reminderService: this.reminderService,
+                        automationService: this.automationService
+                    });
+                    return await interaction.reply({ content: `🔄 ${res.message}`, ...ephFlags });
                 }
             }
 
             if (action === 'zen_auto_run') {
                 if (!this.automationService) {
-                    return await interaction.reply({ content: 'AutomationService is not initialized.', ephemeral: true });
+                    return await interaction.reply({ content: 'AutomationService is not initialized.', flags: MessageFlags.Ephemeral });
                 }
                 const autoId = parts[1];
                 const list = this.automationService.listAutomations(interaction.user.id);
                 const target = list.find(a => a.id === autoId);
                 if (!target) {
-                    return await interaction.reply({ content: `⚠️ Automation \`${autoId}\` not found.`, ephemeral: true });
+                    return await interaction.reply({ content: `⚠️ Automation \`${autoId}\` not found.`, flags: MessageFlags.Ephemeral });
                 }
-                await interaction.deferReply({ ephemeral: Boolean(interaction.guild) });
+                await interaction.deferReply(ephFlags);
                 await this.automationService.executeAutomation(target);
                 return await interaction.editReply(`▶️ Executed **"${target.name}"** — Status: \`${target.lastStatus || 'done'}\``);
             }
@@ -2965,11 +3075,11 @@ class CommandHandler {
                         isDM
                     });
                     if (!access.allowed) {
-                        return await interaction.reply({ content: `🔒 **High-Security Vault Lock:** ${access.reason}`, ephemeral: true });
+                        return await interaction.reply({ content: `🔒 **High-Security Vault Lock:** ${access.reason}`, flags: MessageFlags.Ephemeral });
                     }
                 }
                 const filePath = customId.slice('zen_send_file:'.length);
-                await interaction.deferReply({ ephemeral: true });
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 const { executeTool } = require('../services/llm/toolDefinitions');
                 const res = await executeTool('send_file_to_owner', { filePath }, {
                     config: this.config,
@@ -2989,13 +3099,13 @@ class CommandHandler {
             if (interaction.deferred || interaction.replied) {
                 return await interaction.editReply({ content: `Error: ${err.message}` }).catch(() => {});
             }
-            return await interaction.reply({ content: `Error: ${err.message}`, ephemeral: true }).catch(() => {});
+            return await interaction.reply({ content: `Error: ${err.message}`, flags: MessageFlags.Ephemeral }).catch(() => {});
         }
     }
 
     async handleModalSubmit(interaction) {
         if (!this.isOwner(interaction)) {
-            return await interaction.reply({ content: 'Only Lance can submit this modal.', ephemeral: true });
+            return await interaction.reply({ content: 'Only Lance can submit this modal.', flags: MessageFlags.Ephemeral });
         }
 
         const customId = interaction.customId || '';
@@ -3003,21 +3113,21 @@ class CommandHandler {
             const targetChannelId = customId.slice('zen_reply_submit:'.length);
             const text = interaction.fields.getTextInputValue('reply_text')?.trim();
             if (!text) {
-                return await interaction.reply({ content: 'Reply message cannot be empty.', ephemeral: true });
+                return await interaction.reply({ content: 'Reply message cannot be empty.', flags: MessageFlags.Ephemeral });
             }
             try {
                 const targetChannel = await this.client.channels.fetch(targetChannelId);
                 if (!targetChannel || !targetChannel.isTextBased()) {
-                    return await interaction.reply({ content: `Channel \`${targetChannelId}\` not found or not text-based.`, ephemeral: true });
+                    return await interaction.reply({ content: `Channel \`${targetChannelId}\` not found or not text-based.`, flags: MessageFlags.Ephemeral });
                 }
                 await targetChannel.send(text);
                 const loc = targetChannel.guild ? `#${targetChannel.name} (${targetChannel.guild.name})` : `#${targetChannel.name || targetChannelId}`;
                 return await interaction.reply({
                     content: `✅ Sent to **${loc}**:\n> ${text.slice(0, 300)}`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
             } catch (err) {
-                return await interaction.reply({ content: `❌ Failed to send message: ${err.message}`, ephemeral: true });
+                return await interaction.reply({ content: `❌ Failed to send message: ${err.message}`, flags: MessageFlags.Ephemeral });
             }
         }
     }

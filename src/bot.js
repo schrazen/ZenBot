@@ -151,6 +151,7 @@ class ZenBot {
             this.reminderService.start(this.client);
             this.automationService.start(this.client);
             this.automationService.markEventsHooked?.();
+            this.ownerAvailability.startHardwareMonitor?.();
             this.ownerAvailability.syncRecentActivityFromGuilds(this.client).catch(() => {});
 
             if (!this.botProfileService.getProfile().bio) {
@@ -248,6 +249,9 @@ class ZenBot {
 
     async stop() {
         logger.info('Shutting down ZenBot gracefully...');
+        if (this.ownerAvailability) {
+            this.ownerAvailability.stopHardwareMonitor?.();
+        }
         if (this.reminderService) {
             this.reminderService.stop();
         }

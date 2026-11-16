@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { writeJsonAtomicSync } = require('../utils/atomicWrite');
 const logger = require('../utils/logger');
 
 class AutomationService {
@@ -102,9 +103,7 @@ class AutomationService {
 
     save() {
         try {
-            const dir = path.dirname(this.storagePath);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(this.storagePath, JSON.stringify(this.automations, null, 2), 'utf8');
+            writeJsonAtomicSync(this.storagePath, this.automations);
         } catch (err) {
             logger.error(`Failed to save automations: ${err.message}`);
         }
@@ -296,7 +295,7 @@ class AutomationService {
      * Main background tick evaluating due automations.
      */
     async tick() {
-        if (this.isChecking) return;
+        if (this.isChecking || this.config?.runtime?.standbyMode) return;
         this.isChecking = true;
 
         const now = Date.now();

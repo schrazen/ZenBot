@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { writeJsonAtomicSync } = require('../utils/atomicWrite');
 const logger = require('../utils/logger');
 
 class OwnerAvailabilityService {
@@ -25,7 +27,7 @@ class OwnerAvailabilityService {
         this.lastDmAlert = new Map();
         this.suppressedChannels = new Map();
 
-        // In-memory voice state
+        // In-memory voice & PC hardware idle state
         this.voiceState = {
             inVoice: false,
             channelId: null,
@@ -33,6 +35,9 @@ class OwnerAvailabilityService {
             streaming: false,
             lastVoiceTimestamp: 0
         };
+        this.hardwareState = null;
+        this.hardwareTimer = null;
+        this._hwQueryInFlight = false;
 
         this.data = this.loadState();
     }
@@ -68,13 +73,65 @@ class OwnerAvailabilityService {
      */
     saveState() {
         try {
-            const dir = path.dirname(this.storagePath);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            fs.writeFileSync(this.storagePath, JSON.stringify(this.data, null, 2), 'utf8');
+            writeJsonAtomicSync(this.storagePath, this.data);
         } catch (e) {
             logger.error(`Failed to save owner_activity.json: ${e.message}`);
+        }
+    }
+
+    /**
+     * Queries Win32 GetLastInputInfo (user32.dll) for exact milliseconds since last mouse/keyboard input.
+     * Safe fail-closed design: returns null on non-Windows or if query fails (never falsely claims idle).
+     */
+    queryHardwareIdleMs() {
+        if (process.platform !== 'win32') return Promise.resolve(null);
+        const psCmd = "Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class ZenIdle{[StructLayout(LayoutKind.Sequential)]public struct LASTINPUTINFO{public uint cbSize;public uint dwTime;}[DllImport(\"user32.dll\")]public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);public static uint GetMs(){LASTINPUTINFO l=new LASTINPUTINFO();l.cbSize=(uint)Marshal.SizeOf(l);GetLastInputInfo(ref l);return unchecked((uint)Environment.TickCount-l.dwTime);}}' -ErrorAction SilentlyContinue;[ZenIdle]::GetMs()";
+
+        return new Promise((resolve) => {
+            execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psCmd], { timeout: 2500 }, (err, stdout) => {
+                if (err || !stdout) return resolve(null);
+                const idleMs = parseInt(String(stdout).trim(), 10);
+                if (isNaN(idleMs) || idleMs < 0) return resolve(null);
+                const now = Date.now();
+                this.hardwareState = {
+                    idleMs,
+                    lastInputAt: now - idleMs,
+                    updatedAt: now
+                };
+                if (idleMs < 60 * 1000 && (now - idleMs) > (this.data.last_seen_timestamp || 0)) {
+                    this.data.last_seen_timestamp = now - idleMs;
+                }
+                resolve(idleMs);
+            });
+        });
+    }
+
+    startHardwareMonitor(intervalMs = 25000) {
+        if (process.platform !== 'win32') return;
+        this.stopHardwareMonitor();
+
+        const poll = async () => {
+            if (this._hwQueryInFlight || this.config?.runtime?.standbyMode) return;
+            this._hwQueryInFlight = true;
+            try {
+                await this.queryHardwareIdleMs();
+            } finally {
+                this._hwQueryInFlight = false;
+            }
+        };
+
+        poll().catch(() => {});
+        this.hardwareTimer = setInterval(() => { poll().catch(() => {}); }, intervalMs);
+        if (typeof this.hardwareTimer.unref === 'function') {
+            this.hardwareTimer.unref();
+        }
+        logger.info(`OwnerAvailability: Win32 hardware idle sensor active (${Math.round(intervalMs / 1000)}s interval).`);
+    }
+
+    stopHardwareMonitor() {
+        if (this.hardwareTimer) {
+            clearInterval(this.hardwareTimer);
+            this.hardwareTimer = null;
         }
     }
 
@@ -307,9 +364,22 @@ class OwnerAvailabilityService {
     getAvailabilityState() {
         const now = Date.now();
 
-        // 1. Check manual override
+        // 1. Check manual override (with automatic expiry & 30m hardware-idle release)
         if (this.data.manual_state) {
-            if (this.data.manual_until && now > this.data.manual_until) {
+            const hwIdleStaleOverride = Boolean(
+                this.data.manual_state === 'AVAILABLE' &&
+                this.hardwareState?.updatedAt &&
+                (now - this.hardwareState.updatedAt) < 90 * 1000 &&
+                this.hardwareState.idleMs >= 30 * 60 * 1000 &&
+                (now - (this.data.manual_set_at || 0)) >= 30 * 60 * 1000
+            );
+            if (hwIdleStaleOverride) {
+                logger.info('Manual AVAILABLE override auto-expired due to >=30m PC hardware inactivity.');
+                this.data.manual_state = null;
+                this.data.manual_until = null;
+                this.data.manual_reason = null;
+                this.saveState();
+            } else if (this.data.manual_until && now > this.data.manual_until) {
                 logger.info(`Manual availability state expired.`);
                 this.data.manual_state = null;
                 this.data.manual_until = null;
@@ -325,7 +395,21 @@ class OwnerAvailabilityService {
             }
         }
 
-        // 2. Check voice channel state & live Discord presence
+        // 2. Check PC hardware activity (Win32 GetLastInputInfo), voice channel & live Discord presence
+        if (
+            this.hardwareState?.updatedAt &&
+            (now - this.hardwareState.updatedAt) < 90 * 1000 &&
+            this.hardwareState.idleMs < 10 * 60 * 1000
+        ) {
+            const idleSec = Math.floor(this.hardwareState.idleMs / 1000);
+            const idleDesc = idleSec < 60 ? `${idleSec}s` : `${Math.floor(idleSec / 60)}m`;
+            return {
+                state: 'AVAILABLE',
+                confidence: 0.99,
+                reason: `Active at PC (${idleDesc} hardware idle)`
+            };
+        }
+
         if (this.voiceState.inVoice) {
             return {
                 state: 'AVAILABLE',
@@ -760,6 +844,11 @@ class OwnerAvailabilityService {
      * Returns: { isContact: boolean, responded: boolean, state: string, diffMinutes: number }
      */
     async checkAndRespond(message) {
+        // -1. Stay completely silent in Standby Mode
+        if (this.config?.runtime?.standbyMode) {
+            return { isContact: false, responded: false, standby: true };
+        }
+
         // 0. If owner explicitly suppressed auto-replies recently, stay silent
         if (this.isSuppressed(message.channel?.id)) {
             return { isContact: false, responded: false, suppressedByOwner: true };
@@ -771,9 +860,11 @@ class OwnerAvailabilityService {
             return { isContact: false, responded: false };
         }
 
-        // 1b. Sync recent channel messages before claiming owner is inactive!
-        // Ensures we never miss messages Lance sent while the bot was restarting.
+        // 1b. Refresh recent channel activity AND fresh Windows hardware idle sensor (when hardware monitor is active)
         await this.syncChannelActivity(message.channel);
+        if (this.hardwareTimer && process.platform === 'win32' && (!this.hardwareState || (Date.now() - this.hardwareState.updatedAt) > 15000)) {
+            await this.queryHardwareIdleMs().catch(() => null);
+        }
 
         // 2. Evaluate owner availability state
         const stateInfo = this.getAvailabilityState();
@@ -887,6 +978,12 @@ class OwnerAvailabilityService {
                 .trim();
         }
 
+        // Prevent indefinite AVAILABLE overrides (defaults to 2h TTL if no duration given)
+        if (targetState === 'AVAILABLE' && !until) {
+            until = Date.now() + 2 * 60 * 60 * 1000;
+            durationDesc = ' for 2 hours (auto-expires)';
+        }
+
         this.data.manual_state = targetState;
         this.data.manual_until = until;
         this.data.manual_reason = cleanReason || (durationDesc ? `Manual override${durationDesc}` : 'Manual override');
@@ -962,6 +1059,15 @@ class OwnerAvailabilityService {
                 {
                     name: 'Local Time (Manila)',
                     value: `${manilaTime} (${this.timezone})`,
+                    inline: true
+                },
+                {
+                    name: 'PC Hardware Sensor',
+                    value: this.hardwareState?.updatedAt
+                        ? (this.hardwareState.idleMs < 60000
+                            ? `Active (${Math.round(this.hardwareState.idleMs / 1000)}s idle)`
+                            : `Idle ${Math.floor(this.hardwareState.idleMs / 60000)}m`)
+                        : (process.platform === 'win32' ? 'Initializing...' : 'N/A (non-Windows)'),
                     inline: true
                 }
             )

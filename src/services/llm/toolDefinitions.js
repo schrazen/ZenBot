@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const defaultConfig = require('../../config');
+const lifecycle = require('../../utils/lifecycle');
 const logger = require('../../utils/logger');
 
 const HIGH_SECURITY_TOOLS = new Set([
@@ -17,7 +18,8 @@ const HIGH_SECURITY_TOOLS = new Set([
     'search_files',
     'find_files',
     'send_file_to_owner',
-    'run_command'
+    'run_command',
+    'control_bot_lifecycle'
 ]);
 
 const toolSpecs = [
@@ -177,6 +179,24 @@ const toolSpecs = [
                 }
             },
             required: ['state']
+        }
+    },
+    {
+        name: 'control_bot_lifecycle',
+        description: 'Put ZenBot into Standby Mode (pauses watchers, reminders, and server replies while staying reachable in DM to wake), Wake ZenBot back up, Restart, or Shut Down the ZenBot Node process cleanly (Owner DM only).',
+        parameters: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    description: 'Lifecycle action: "standby" (pause background tasks & server replies, wakeable from DM), "wake" (resume online), "shutdown" (exit Node process completely), or "restart".'
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Optional reason for standby/shutdown.'
+                }
+            },
+            required: ['action']
         }
     },
     {
@@ -501,6 +521,7 @@ const TOOL_CATEGORIES = {
     files: ['read_file', 'list_directory', 'search_files', 'find_files', 'send_file_to_owner'],
     code_edit: ['read_file', 'write_file', 'edit_file', 'propose_self_upgrade', 'run_command', 'search_files', 'list_directory'],
     discord: ['read_discord_channel', 'post_discord_message', 'set_owner_availability'],
+    lifecycle: ['control_bot_lifecycle'],
     memory: ['remember_fact', 'save_preference', 'search_memory', 'set_persona_mode', 'update_project_task'],
     web: ['web_search', 'fetch_web_page'],
     scheduling: ['set_reminder', 'list_reminders', 'delete_reminder', 'schedule_automation', 'list_automations', 'delete_automation']
@@ -563,6 +584,11 @@ function inferToolNamesForQuery(query = '', optionsOrExtras = []) {
 
     if (/\b(?:discord|server|channel|banorant|banoranttt|rodericks|col|chat|messages?|recap|catch\s*up|summariz|post|reply|friends?|status|avail|availability|online|offline|away|afk|sleep|mute|button|buttons|ui)\b/i.test(text)) {
         addCategory('discord');
+        matchedAny = true;
+    }
+
+    if (/\b(?:shutdown|shut\s*down|turn\s*off|standby|stand\s*by|power\s*off|restart|reboot|wake\s+up|wake\s+bot|resume\s+bot|pause\s+bot)\b/i.test(text)) {
+        addCategory('lifecycle');
         matchedAny = true;
     }
 
@@ -652,7 +678,7 @@ function getGeminiTools(allowedNames = null) {
 /**
  * Executes a tool by name with arguments against the corresponding service.
  */
-async function executeTool(name, rawArgs, { config, workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, memoryManager, client, automationState, channelCheckStats, userId, username, channelId, isDM = false }) {
+async function executeTool(name, rawArgs, { config, workspaceService, reminderService, webSearchService, automationService, selfUpgradeService, channelHistory, ownerAvailability, memoryManager, botProfileService, client, automationState, channelCheckStats, userId, username, channelId, isDM = false, skipExit = false }) {
     let args = rawArgs;
     if (typeof args === 'string') {
         try {
@@ -878,6 +904,35 @@ async function executeTool(name, rawArgs, { config, workspaceService, reminderSe
                     state: res.state,
                     message: res.message
                 };
+            }
+
+            case 'control_bot_lifecycle': {
+                const action = String(args.action || '').toLowerCase().trim();
+                if (action === 'standby' || action === 'pause' || action === 'sleep') {
+                    return lifecycle.applyStandbyMode(secConfig, { client, reason: args.reason || null });
+                }
+                if (action === 'wake' || action === 'resume' || action === 'online') {
+                    return lifecycle.applyWakeMode(secConfig, { client, botProfileService });
+                }
+                if (action === 'shutdown' || action === 'off' || action === 'stop' || action === 'poweroff') {
+                    return lifecycle.scheduleShutdown(secConfig, {
+                        client,
+                        ownerAvailability,
+                        reminderService,
+                        automationService,
+                        skipExit
+                    });
+                }
+                if (action === 'restart' || action === 'reboot') {
+                    return lifecycle.scheduleRestart(secConfig, {
+                        client,
+                        ownerAvailability,
+                        reminderService,
+                        automationService,
+                        skipExit
+                    });
+                }
+                return { error: `Unknown lifecycle action "${args.action}". Use "standby", "wake", "shutdown", or "restart".` };
             }
 
             case 'list_directory': {

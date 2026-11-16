@@ -1,3 +1,4 @@
+const { readSseJsonStream } = require('../../utils/sseStream');
 const logger = require('../../utils/logger');
 
 class GroqProvider {
@@ -34,9 +35,13 @@ class GroqProvider {
             payload.reasoning_effort = options.reasoningEffort || 'low';
         }
 
+        const useStream = Boolean(typeof options.onDelta === 'function' && (!options.tools || options.tools.length === 0));
         if (options.tools && Array.isArray(options.tools)) {
             payload.tools = options.tools;
             payload.tool_choice = options.tool_choice || 'auto';
+        } else if (useStream) {
+            payload.stream = true;
+            payload.stream_options = { include_usage: true };
         }
 
         const startTime = Date.now();
@@ -51,9 +56,9 @@ class GroqProvider {
                 body: JSON.stringify(payload)
             });
 
-            const data = await res.json();
-
             if (!res.ok) {
+                let data = {};
+                try { data = await res.json(); } catch (e) {}
                 const errMessage = data?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
 
                 // Do NOT retry fallbackModel on 429 (same org 8,000 TPM pool) or malformed <|channel|> tool syntax;
@@ -74,6 +79,50 @@ class GroqProvider {
                 throw new Error(`Groq API error: ${errMessage}`);
             }
 
+            const rateLimits = {
+                limitRequests: res.headers.get('x-ratelimit-limit-requests'),
+                remainingRequests: res.headers.get('x-ratelimit-remaining-requests'),
+                limitTokens: res.headers.get('x-ratelimit-limit-tokens'),
+                remainingTokens: res.headers.get('x-ratelimit-remaining-tokens'),
+                resetTokens: res.headers.get('x-ratelimit-reset-tokens')
+            };
+
+            if (useStream) {
+                let reply = '';
+                let finishReason = 'stop';
+                let usage = null;
+                await readSseJsonStream(res, async (chunk) => {
+                    const ch = chunk.choices?.[0];
+                    const deltaText = ch?.delta?.content || '';
+                    if (deltaText) {
+                        reply += deltaText;
+                        try { await options.onDelta(reply); } catch (e) {}
+                    }
+                    if (ch?.finish_reason) finishReason = ch.finish_reason;
+                    if (chunk.usage) usage = chunk.usage;
+                });
+
+                if (!reply.trim()) {
+                    throw new Error('Groq returned empty response content.');
+                }
+
+                const latencyMs = Date.now() - startTime;
+                this.lastUsage = usage;
+                this.lastRateLimits = rateLimits;
+                return {
+                    content: reply.trim(),
+                    toolCalls: null,
+                    finishReason: finishReason === 'length' ? 'length' : 'stop',
+                    rawMessage: { role: 'assistant', content: reply.trim() },
+                    provider: 'groq',
+                    model: modelToUse,
+                    latencyMs,
+                    usage,
+                    rateLimits
+                };
+            }
+
+            const data = await res.json();
             const choice = data.choices?.[0];
             const rawMsg = choice?.message;
             const finishReason = choice?.finish_reason || 'stop';
@@ -101,14 +150,6 @@ class GroqProvider {
             }
 
             const latencyMs = Date.now() - startTime;
-            const rateLimits = {
-                limitRequests: res.headers.get('x-ratelimit-limit-requests'),
-                remainingRequests: res.headers.get('x-ratelimit-remaining-requests'),
-                limitTokens: res.headers.get('x-ratelimit-limit-tokens'),
-                remainingTokens: res.headers.get('x-ratelimit-remaining-tokens'),
-                resetTokens: res.headers.get('x-ratelimit-reset-tokens')
-            };
-
             this.lastUsage = data.usage || null;
             this.lastRateLimits = rateLimits;
 

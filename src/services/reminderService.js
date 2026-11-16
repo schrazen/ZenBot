@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { writeJsonAtomicSync } = require('../utils/atomicWrite');
 const logger = require('../utils/logger');
 
 class ReminderService {
@@ -33,11 +34,7 @@ class ReminderService {
 
     save() {
         try {
-            const dir = path.dirname(this.storagePath);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-            fs.writeFileSync(this.storagePath, JSON.stringify(this.reminders, null, 2), 'utf8');
+            writeJsonAtomicSync(this.storagePath, this.reminders);
         } catch (err) {
             logger.error(`Failed to save reminders: ${err.message}`);
         }
@@ -359,7 +356,7 @@ class ReminderService {
      * Checks due reminders and delivers Discord notifications.
      */
     async tick() {
-        if (!this.client) return;
+        if (!this.client || this.config?.runtime?.standbyMode) return;
         const now = Date.now();
 
         const dueReminders = this.reminders.filter(r => !r.completed && r.dueAt <= now);

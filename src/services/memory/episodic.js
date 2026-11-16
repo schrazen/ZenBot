@@ -1,5 +1,7 @@
 const fs = require('fs');
 const path = require('path');
+const { writeJsonAtomicSync } = require('../../utils/atomicWrite');
+const { getSqliteMemoryEngine } = require('./sqliteEngine');
 const logger = require('../../utils/logger');
 
 const STOP_WORDS = new Set([
@@ -18,6 +20,8 @@ class EpisodicMemory {
         this.filePath = filePath;
         this.maxEntries = maxEntries;
         this.memories = this._load();
+        this.sqlite = getSqliteMemoryEngine(this.filePath);
+        this.sqlite.syncEpisodicFromJson(this.memories);
     }
 
     _load() {
@@ -35,9 +39,7 @@ class EpisodicMemory {
 
     _save(data) {
         try {
-            const dir = path.dirname(this.filePath);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf8');
+            writeJsonAtomicSync(this.filePath, data);
         } catch (e) {
             logger.error(`Failed to save memories: ${e.message}`);
         }
@@ -71,22 +73,23 @@ class EpisodicMemory {
 
         this.memories.push(entry);
 
-        // Keep size within bounds
+        // Keep JSON working set compact while SQLite retains full searchable history
         if (this.memories.length > this.maxEntries) {
             this.memories = this.memories.slice(-this.maxEntries);
         }
 
+        this.sqlite?.insertEpisodic(entry);
         this._save(this.memories);
         return entry;
     }
 
     /**
-     * Hybrid relevance retrieval with DM/Guild scope isolation:
+     * Hybrid SQLite FTS5 (BM25) + Reciprocal Rank Fusion retrieval with DM/Guild scope isolation:
      * - In public guild channels (`isDM === false`), strictly exclude private DM memories.
      * - In private DMs (`isDM === true`), exclude noisy public server banter unless `includeGuild` is set.
      */
     retrieve(query, topK = 2, options = {}) {
-        if (!query || !this.memories.length) return [];
+        if (!query || (!this.memories.length && !(this.sqlite?.getEpisodicCount?.() > 0))) return [];
 
         const cleanQuery = query.toLowerCase();
         const terms = cleanQuery.split(/[^a-z0-9]+/).filter(t => t.length > 2 && !STOP_WORDS.has(t));
@@ -99,13 +102,11 @@ class EpisodicMemory {
 
         const eligible = this.memories.filter(entry => {
             if (filterIsDM === false) {
-                // Public channel: never leak private DM conversations
                 if (entry.isDM === true || entry.scope === 'dm') return false;
                 if (options.channelId && entry.channelId && entry.channelId !== options.channelId && !includeGuild) {
                     return false;
                 }
             } else if (filterIsDM === true && !includeGuild) {
-                // Private DM: skip tagged guild banter or `[From Name]:` lines
                 if (entry.scope === 'guild') return false;
                 if (/^\[From\s+[^\]]+\]:/i.test(entry.content || '')) return false;
             }
@@ -116,12 +117,10 @@ class EpisodicMemory {
             const text = (entry.content || '').toLowerCase();
             let score = 0;
 
-            // 1. Exact phrase match bonus (meaningful phrases)
             if (cleanQuery.length > 10 && text.includes(cleanQuery)) {
                 score += 15;
             }
 
-            // 2. Term frequency matching on non-stop words
             for (const term of terms) {
                 const count = (text.match(new RegExp('\\b' + term, 'gi')) || []).length;
                 if (count > 0) {
@@ -129,14 +128,12 @@ class EpisodicMemory {
                 }
             }
 
-            // 3. Scope affinity boost
             if (filterIsDM === true && entry.scope === 'dm') {
                 score += 3;
             } else if (options.channelId && entry.channelId === options.channelId) {
                 score += 2;
             }
 
-            // 4. Recency boost (events from last 24h get a minor boost)
             const ageDays = (now - entry.ts) / oneDayMs;
             if (ageDays < 7) {
                 score += Math.max(0, 2 - ageDays * 0.2);
@@ -145,21 +142,55 @@ class EpisodicMemory {
             return { entry, score };
         }).filter(item => item.score >= 6);
 
-        // Sort descending by relevance score
         scored.sort((a, b) => b.score - a.score);
 
-        return scored.slice(0, topK).map(s => s.entry);
+        // Query SQLite FTS5 BM25 archive and combine via Reciprocal Rank Fusion (RRF)
+        const bm25Results = this.sqlite?.isReady()
+            ? this.sqlite.searchEpisodicBM25(query, {
+                isDM: filterIsDM,
+                channelId: options.channelId,
+                includeGuild,
+                topK: Math.max(4, topK * 2)
+            })
+            : [];
+
+        if (bm25Results.length === 0) {
+            return scored.slice(0, topK).map(s => s.entry);
+        }
+
+        const k = 60;
+        const rrfScores = new Map();
+        const byId = new Map();
+
+        scored.slice(0, topK * 2).forEach((item, idx) => {
+            const e = item.entry;
+            byId.set(e.id, e);
+            rrfScores.set(e.id, (rrfScores.get(e.id) || 0) + (1 / (k + idx + 1)));
+        });
+
+        bm25Results.forEach((e, idx) => {
+            if (!byId.has(e.id)) byId.set(e.id, e);
+            rrfScores.set(e.id, (rrfScores.get(e.id) || 0) + (1 / (k + idx + 1)));
+        });
+
+        return Array.from(rrfScores.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, topK)
+            .map(([id]) => byId.get(id))
+            .filter(Boolean);
     }
 
     clear() {
         this.memories = [];
+        this.sqlite?.clearEpisodic();
         this._save([]);
         logger.info('Episodic memories cleared.');
     }
 
     getStats() {
+        const sqliteCount = this.sqlite?.isReady() ? this.sqlite.getEpisodicCount() : this.memories.length;
         return {
-            totalMemories: this.memories.length,
+            totalMemories: Math.max(this.memories.length, sqliteCount),
             oldest: this.memories[0]?.date || null,
             newest: this.memories[this.memories.length - 1]?.date || null
         };

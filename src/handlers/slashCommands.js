@@ -1,3 +1,6 @@
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 const { SlashCommandBuilder, REST, Routes } = require('discord.js');
 const logger = require('../utils/logger');
 
@@ -401,33 +404,50 @@ const slashCommands = [
 
 /**
  * Registers global slash commands and purges legacy/dead guild commands.
+ * Uses SHA-256 hash caching in data/.slash_commands_hash to skip redundant REST PUTs on unchanged boots.
  */
-async function registerSlashCommands(config) {
+async function registerSlashCommands(config, options = {}) {
     if (!config.discord.token || !config.discord.clientId) {
         logger.warn('Skipping slash command registration: missing token or clientId');
-        return;
+        return { skipped: true, reason: 'missing_credentials' };
+    }
+
+    const payload = slashCommands.map(cmd => cmd.toJSON());
+    const guildsToClean = Array.from(new Set([
+        config.discord.guildId,
+        '873791689939107861',
+        '1484106877708013608'
+    ].filter(Boolean)));
+
+    const hashFile = path.join(config.paths?.data || path.join(__dirname, '../../data'), '.slash_commands_hash');
+    const currentHash = crypto
+        .createHash('sha256')
+        .update(JSON.stringify({ clientId: config.discord.clientId, payload, guildsToClean }))
+        .digest('hex');
+
+    if (!options.force && fs.existsSync(hashFile)) {
+        try {
+            const cachedHash = fs.readFileSync(hashFile, 'utf8').trim();
+            if (cachedHash === currentHash) {
+                logger.info(`Slash commands unchanged (SHA-256 ${currentHash.slice(0, 8)}) — skipped redundant Discord API sync.`);
+                return { skipped: true, reason: 'unchanged_hash', hash: currentHash };
+            }
+        } catch (e) {}
     }
 
     const rest = new REST({ version: '10' }).setToken(config.discord.token);
 
     try {
         logger.info('Registering ZenBot slash commands with Discord API...');
-        const payload = slashCommands.map(cmd => cmd.toJSON());
 
-        // 1. Register global application commands (atomically replaces all 46 dead legacy Hermes commands)
+        // 1. Register global application commands
         const registered = await rest.put(
             Routes.applicationCommands(config.discord.clientId),
             { body: payload }
         );
         logger.success(`Successfully registered ${registered.length} global slash commands with Discord.`);
 
-        // 2. Clear any stale guild-level commands from known guilds
-        const guildsToClean = [
-            config.discord.guildId,
-            '873791689939107861',
-            '1484106877708013608'
-        ].filter(Boolean);
-
+        // 2. Clear any stale guild-level commands from known guilds (deduplicated)
         for (const gId of guildsToClean) {
             try {
                 await rest.put(
@@ -439,8 +459,17 @@ async function registerSlashCommands(config) {
                 // Guild might not be accessible or bot might not be there
             }
         }
+
+        try {
+            const dir = path.dirname(hashFile);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(hashFile, currentHash, 'utf8');
+        } catch (e) {}
+
+        return { skipped: false, count: registered.length, hash: currentHash };
     } catch (error) {
         logger.error(`Failed to register slash commands: ${error.message}`);
+        return { skipped: false, error: error.message };
     }
 }
 

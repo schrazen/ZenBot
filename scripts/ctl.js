@@ -97,7 +97,7 @@ function getEnvSummary() {
     if (fs.existsSync(ENV_FILE)) {
         try {
             const raw = fs.readFileSync(ENV_FILE, 'utf8');
-            const pMatch = raw.match(/^LLM_PROVIDER\s*=\s*(.+)$/m);
+            const pMatch = raw.match(/^(?:DEFAULT_PROVIDER|LLM_PROVIDER)\s*=\s*(.+)$/m);
             const mMatch = raw.match(/^GROQ_MODEL\s*=\s*(.+)$/m);
             if (pMatch) provider = pMatch[1].trim();
             if (mMatch) model = mMatch[1].trim();
@@ -107,12 +107,13 @@ function getEnvSummary() {
 }
 
 /**
- * Reads flashcards and memory counts
+ * Reads flashcards, persistent facts, and memory counts
  */
 function getDataSummary() {
     let deckCount = 0;
     let cardCount = 0;
     let factCount = 0;
+    let memoryCount = 0;
 
     if (fs.existsSync(DECKS_FILE)) {
         try {
@@ -123,14 +124,26 @@ function getDataSummary() {
         } catch (e) {}
     }
 
-    if (fs.existsSync(MEMORIES_FILE)) {
+    const factsFile = path.join(DATA_DIR, 'facts.json');
+    if (fs.existsSync(factsFile)) {
         try {
-            const mem = JSON.parse(fs.readFileSync(MEMORIES_FILE, 'utf8'));
-            factCount = mem.facts?.length || 0;
+            const facts = JSON.parse(fs.readFileSync(factsFile, 'utf8'));
+            factCount = Array.isArray(facts) ? facts.length : 0;
         } catch (e) {}
     }
 
-    return { deckCount, cardCount, factCount };
+    if (fs.existsSync(MEMORIES_FILE)) {
+        try {
+            const mem = JSON.parse(fs.readFileSync(MEMORIES_FILE, 'utf8'));
+            if (Array.isArray(mem)) {
+                memoryCount = mem.length;
+            } else if (Array.isArray(mem?.facts) && factCount === 0) {
+                factCount = mem.facts.length;
+            }
+        } catch (e) {}
+    }
+
+    return { deckCount, cardCount, factCount, memoryCount };
 }
 
 /**
@@ -224,7 +237,7 @@ function printStatus(verbose = false) {
     console.log(`  Status:     ${statusTag}`);
     console.log(`  Presence:   ${c.yellow}${prof.activityType || 'Watching'}${c.reset} "${prof.activity || 'None'}" [${c.green}${c.bold}${(prof.presence || 'online').toUpperCase()}${c.reset}]`);
     console.log(`  AI Engine:  ${c.bold}${env.provider.toUpperCase()}${c.reset} [${env.model}] (Gemini Fallback: active)`);
-    console.log(`  Data:       ${c.magenta}${data.deckCount} study deck(s)${c.reset} (${data.cardCount} cards) | ${c.blue}${data.factCount} persistent facts${c.reset}`);
+    console.log(`  Data:       ${c.magenta}${data.deckCount} study deck(s)${c.reset} (${data.cardCount} cards) | ${c.blue}${data.factCount} fact(s)${c.reset} | ${c.gray}${data.memoryCount || 0} recent turns${c.reset}`);
     console.log(`  Directory:  ${c.dim}${ROOT_DIR}${c.reset}`);
     console.log(`${c.cyan}----------------------------------------------------------------------${c.reset}`);
 

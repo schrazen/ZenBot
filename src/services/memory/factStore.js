@@ -1,11 +1,15 @@
 const fs = require('fs');
 const path = require('path');
+const { writeJsonAtomicSync } = require('../../utils/atomicWrite');
+const { getSqliteMemoryEngine } = require('./sqliteEngine');
 const logger = require('../../utils/logger');
 
 class FactStore {
     constructor(filePath) {
         this.filePath = filePath;
         this.facts = this._load();
+        this.sqlite = getSqliteMemoryEngine(this.filePath);
+        this.sqlite.syncFactsFromJson(this.facts);
     }
 
     _load() {
@@ -23,9 +27,7 @@ class FactStore {
 
     _save(data) {
         try {
-            const dir = path.dirname(this.filePath);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf8');
+            writeJsonAtomicSync(this.filePath, data);
         } catch (e) {
             logger.error(`Failed to save facts: ${e.message}`);
         }
@@ -49,6 +51,7 @@ class FactStore {
         if (existing) {
             if (category) existing.category = category;
             existing.updatedAt = new Date().toISOString();
+            this.sqlite?.upsertFact(existing);
             this._save(this.facts);
             return existing;
         }
@@ -61,6 +64,7 @@ class FactStore {
         };
 
         this.facts.push(entry);
+        this.sqlite?.upsertFact(entry);
         this._save(this.facts);
         logger.info(`Saved fact [${entry.category}]: ${entry.fact}`);
         return entry;
@@ -68,7 +72,6 @@ class FactStore {
 
     removeFact(queryOrId) {
         const lower = queryOrId.toLowerCase().trim();
-        const initialLen = this.facts.length;
 
         // Try exact ID match first
         let index = this.facts.findIndex(f => f.id === lower);
@@ -79,6 +82,7 @@ class FactStore {
 
         if (index !== -1) {
             const removed = this.facts.splice(index, 1)[0];
+            this.sqlite?.deleteFact(removed.id);
             this._save(this.facts);
             return removed;
         }
@@ -92,9 +96,10 @@ class FactStore {
 
     search(query, topK = 5) {
         if (!query || !this.facts.length) return [];
+        const ftsMatches = this.sqlite?.isReady() ? this.sqlite.searchFactsBM25(query, topK) : [];
         const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
 
-        if (!words.length) return this.facts.slice(-topK);
+        if (!words.length && ftsMatches.length === 0) return this.facts.slice(-topK);
 
         const scored = this.facts.map(f => {
             const text = (f.category + ' ' + f.fact).toLowerCase();
@@ -106,7 +111,15 @@ class FactStore {
         }).filter(x => x.score > 0);
 
         scored.sort((a, b) => b.score - a.score);
-        return scored.slice(0, topK).map(x => x.fact);
+        const merged = [...ftsMatches];
+        const seen = new Set(merged.map(f => f.id));
+        for (const item of scored) {
+            if (!seen.has(item.fact.id)) {
+                merged.push(item.fact);
+                seen.add(item.fact.id);
+            }
+        }
+        return merged.slice(0, topK);
     }
 
     toPromptContext(relevantQuery = '', { isDM = false } = {}) {

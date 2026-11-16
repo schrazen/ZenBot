@@ -17,6 +17,8 @@ data/profile.json
 data/projects.json
 data/owner_activity.json
 data/study_decks.json
+data/*.sqlite*
+data/*.tmp
 data/*.log
 data/*.pid
 scratch/

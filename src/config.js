@@ -224,6 +224,14 @@ const config = {
         enabled: (process.env.ALLOW_AUTONOMY || 'true').toLowerCase() === 'true'
     },
 
+    // Mutable Runtime Lifecycle State (standby, shutdown, etc.)
+    runtime: {
+        standbyMode: false,
+        standbyReason: null,
+        standbySince: null,
+        shuttingDown: false
+    },
+
     // Assistant Persona & Prompt Generator
     persona: {
         botName: 'ZenBot',

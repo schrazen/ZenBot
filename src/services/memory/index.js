@@ -39,11 +39,36 @@ class MemoryManager {
         }
         this.shortTermHistory.set(channelId, history);
 
-        // 2. Long-term episodic memory (with DM vs guild isolation)
+        // 2. Long-term episodic memory (with DM vs guild isolation & SQLite FTS5 indexing)
         this.episodic.add(role, cleaned, {
             channelId,
             isDM: Boolean(meta.isDM)
         });
+
+        // 3. Automatic fact distillation from owner DMs (prevents facts.json remaining empty)
+        if (role === 'user' && meta.isDM === true && cleaned.length >= 16 && cleaned.length <= 320 && !cleaned.endsWith('?')) {
+            this._distillFactFromDM(cleaned);
+        }
+    }
+
+    /**
+     * Distills explicit personal schedules, deadlines, projects, or durable facts from DM turns.
+     */
+    _distillFactFromDM(text) {
+        const clean = String(text || '').trim();
+        if (!clean || clean.startsWith('!')) return null;
+
+        const signal = /\b(?:my\s+(?:[a-z0-9_-]+\s+){0,3}(?:exam|quiz|defense|deadline|schedule|class|meeting|birthday|interview|thesis|capstone|project|shift|flight)|i\s+(?:have|got)\s+(?:an?\s+)?(?:[a-z0-9_-]+\s+){0,2}(?:exam|quiz|defense|meeting|deadline|interview|class)|(?:deadline|defense|presentation|submission)\s+(?:is|on)\b)/i;
+        if (!signal.test(clean)) return null;
+
+        try {
+            const category = /\b(?:exam|quiz|defense|class|thesis|capstone|submission)\b/i.test(clean)
+                ? 'Schedule'
+                : this.facts.inferCategory(clean);
+            return this.facts.addFact(clean, category);
+        } catch (e) {
+            return null;
+        }
     }
 
     /**

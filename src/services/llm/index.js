@@ -349,6 +349,7 @@ class LLMManager {
             'edit_file',
             'post_discord_message',
             'set_owner_availability',
+            'control_bot_lifecycle',
             'schedule_automation',
             'delete_automation',
             'set_reminder',
